@@ -13,3 +13,5 @@ modules.order
 .project
 .settings
 .cache.mk
+__pycache__/
+*.py[cod]
