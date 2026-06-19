@@ -15,3 +15,5 @@ modules.order
 .cache.mk
 __pycache__/
 *.py[cod]
+mac/t6proto/build/
+mac/t6proto-rs/target/
