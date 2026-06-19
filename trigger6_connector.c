@@ -19,10 +19,13 @@ static int trigger6_read_edid(void *data, u8 *buf, unsigned int block, size_t le
 			      USB_DIR_IN | USB_TYPE_VENDOR, offset,
 			      0, buf, length, USB_CTRL_GET_TIMEOUT);
 
-	// TODO remove
-	drm_warn(trigger6->connector.dev, "read edid: %d %zu\n", buf[4], length);
+	if (ret < 0)
+		return ret;
 
-	return 0;
+	if (ret != length)
+		return -EIO;
+
+	return ret;
 }
 
 static int trigger6_connector_get_modes(struct drm_connector *connector)

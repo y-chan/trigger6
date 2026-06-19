@@ -244,7 +244,32 @@ user-space 側の文字列に `FENCE_ID` があるので、`packet[0x0c]` の連
 手元情報:
 
 - Mac では専用アプリ/DriverKit extension が動き、仮想ディスプレイを作って、その画面を USB 側へ転送しているように見える。
-- Windows では追加ドライバ無しでも動き、Mac のような明示的な画面キャプチャ処理は発生していなさそう。
+- Windows では追加ドライバ無しでも動くが、デバイスマネージャ上は `Trigger 6 External Graphics` として見えており、MCT 製 driver file が使われている。
+
+Windows で確認済みの driver / device 情報:
+
+- Device Manager name: `Trigger 6 External Graphics`
+- USB Device Tree Viewer: `Magic Control T6 USB Station` device の下に `Trigger 6 External Graphics` がいる形。
+- USB device name: `T6 USB Station`
+- Hardware IDs: `USB\VID_0711&PID_5601&REV_1010`, `USB\VID_0711&PID_5601`
+- USB class: vendor specific, `bDeviceClass = 0xff`, interface class `0xff`
+- USB version / speed: USB 3.1 Gen 1, SuperSpeed operating mode
+- Device driver:
+  - `C:/Windows/System32/Drivers/t6sta.sys`
+  - Version: `1.0.24.711`
+  - Date: `2025-10-29`
+  - Company: `Magic Control Technology Corporation`
+  - INF: `C:/Windows/inf/oem77.inf`
+- Driver files:
+  - `C:/Windows/System32/DRIVERS/UMDF/Trgldd.dll`
+  - `C:/Windows/System32/t6indisp.dll`
+- Endpoints:
+  - `0x81`: bulk IN, endpoint 1, max packet `0x400`
+  - `0x02`: bulk OUT, endpoint 2, max packet `0x400`
+  - `0x83`: interrupt IN, endpoint 3, max packet `0x40`, interval 2 ms
+- Product behavior note: public/product-level behavior is reportedly 4K at up to 30 fps, and 1080p at up to 60 fps. This matches the working hypothesis that 4K may use a distinct high-resolution/lower-fps transfer path from the 1080p JPEG-tile path.
+
+`t6indisp.dll` という名前から、Windows 側は indirect display driver 系の構成である可能性が高い。手動インストール不要に見えても、Windows Update などで MCT の driver package が入っている可能性を優先して見る。
 
 Mac 側は推測ではなく、user-space driver binary の文字列からかなり裏が取れている。
 
@@ -314,6 +339,233 @@ Mac DEXT には interrupt pipe read がある。
 
 video interrupt の2値は、user-space 側の文字列から見ると `JPEG_ERROR`, `FENCE_ID`, `PORT_0_CONNECTION`, `PORT_1_CONNECTION` のどれかに対応している可能性がある。`MCTT6Device::handleVideoInterrupt: JPEG decoder error! (fence ID %08x)` という文字列があり、少なくとも JPEG decoder error と fence ID は interrupt 経由で来るらしい。
 
+## Windows capture: initial USBPcap probe
+
+Windows 上で `tshark -D` を確認したところ、JUA365 は `USBPcap1` 側にいた。
+
+短時間 probe:
+
+```text
+file: captures/probe_usbpcap1.pcapng
+interface: \\.\USBPcap1
+duration: 5s
+packets: 2293
+```
+
+`tools/t6_pcap_summary.py --summary-only` の結果:
+
+```text
+packets 2293
+commands 66
+video_payloads 11
+interrupts 22
+video_count type=0x3 format=0xd count=11
+interrupt_count flags=0x04 event=0x04 count=22
+```
+
+既存 Linux usbmon capture では主に `type=0x4 format=0x0d` の JPEG payload が見えていたが、Windows MCT driver 経路の probe では `type=0x3 format=0x0d` が出た。どちらも JPEG format `0x0d` なので、Windows でも raw RGB ではなく JPEG/VRAM/fence 系の T6 payload を使っていることはかなり確度が高い。
+
+次に取るべき capture:
+
+- HDMI 未接続からの full enumeration。
+- HDMI hotplug。
+- solid color full-screen。
+- partial update。
+
+追加で取得済み:
+
+```text
+file: captures/2026-06-19_jua365_win_01_enumeration_no_hdmi_retry.pcapng
+interface: \\.\USBPcap1
+packets: 9904
+commands: 0
+video_payloads: 0
+interrupts: 2
+interrupt_count flags=0x20 event=0x00 count=2
+
+file: captures/2026-06-19_jua365_win_02_hdmi1_hotplug.pcapng
+interface: \\.\USBPcap1
+packets: 14378
+commands: 935
+video_payloads: 148
+interrupts: 288
+video_count type=0x3 format=0x0d count=40
+video_count type=0x7 format=0x0d count=108
+interrupt_count flags=0x04 event=0x01 count=2
+interrupt_count flags=0x04 event=0x04 count=283
+interrupt_count flags=0x20 event=0x00 count=3
+
+file: captures/2026-06-19_jua365_win_04_solid_colors.pcapng
+interface: \\.\USBPcap1
+packets: 23036
+commands: 1722
+video_payloads: 124
+interrupts: 457
+video_count type=0x7 format=0x0d count=124
+interrupt_count flags=0x04 event=0x04 count=457
+
+file: captures/2026-06-19_jua365_win_05_partial_update.pcapng
+interface: \\.\USBPcap1
+packets: 26841
+commands: 2090
+video_payloads: 95
+interrupts: 649
+video_count type=0x7 format=0x0d count=95
+interrupt_count flags=0x04 event=0x04 count=649
+
+file: captures/2026-06-19_jua365_win_03_resolution_change.pcapng
+interface: \\.\USBPcap1
+packets: 20488
+commands: 2016
+video_payloads: 137
+interrupts: 454
+video_count type=0x7 format=0x0d count=137
+interrupt_count flags=0x04 event=0x04 count=454
+
+file: captures/2026-06-19_jua365_win_06_4k_hotplug.pcapng
+interface: \\.\USBPcap1
+packets: 186500
+note: 4K display was attached first, then a 1920x1080 display was also attached during the capture.
+
+file: captures/2026-06-19_jua365_win_07_4k_only.pcapng
+interface: \\.\USBPcap1
+packets: 124049
+note: 4K display only.
+```
+
+観察:
+
+- Windows MCT driver 経路では `type=0x3 format=0x0d` が hotplug 前後の JPEG upload に出る。
+- `type=0x7` は `type=0x3/0x4` と header layout が少し違い、offset `0x14` に `0x07800780` のような packed field が入る。これは `canvas=1920x1920` のように見える。
+- `type=0x7` の VRAM start/end と image format は `type=0x3/0x4` より 4 byte 後ろにずれる。summary tool はこの layout 差を反映済み。
+- 修正後の解釈では `type=0x7 format=0x0d` で、payload offset `0x30` に JPEG SOI が来る。つまり `type=0x7` も JPEG tile/dirty update と見てよい。
+- `type=0x7` の詳細行では `jpeg=128x576`, `128x544`, `64x544`, `64x928`, `64x1080` などの細長い tile が見えており、dirty rect / tiled update の可能性が高い。`width_field` / `height_field` は JPEG SOF の width / height と一致する。
+- `type=0x7` の例:
+  - `type=0x7 data_len=0x2fb0 seq=7998 hint=0x6 width_field=0x40 height_field=0x220 canvas=1920x1920 start=0x30 end=0x1fe030 format=0xd jpeg=64x544`
+  - `type=0x7 data_len=0x123b0 seq=8008 hint=0x6 width_field=0x720 height_field=0x60 canvas=1920x1920 start=0x18aab50 end=0x1aa8b50 format=0xd jpeg=1824x96`
+- 1080p header CSV / extracted samples:
+  - `captures/1080p_video_headers.csv`
+  - `captures/1080p_frame4650_type7_64x1080.jpg`
+  - `captures/1080p_frame4650_type7_64x1080.header.bin`
+- Representative type 7 header fields for `64x1080` JPEG:
+  - `w0=0x00000007`: type
+  - `w1=0x000053b0`: JPEG payload length + 0x30 header length
+  - `w2`: sequence/fence-like counter
+  - `w3=0x00000006`: flags/hint
+  - `w4=0x04380040`: `height << 16 | width`
+  - `w5=0x07800780`: `canvas_height << 16 | canvas_width` = `1920x1920`
+  - `w6/w7`: VRAM start/end
+  - `w9=0x0000000d`: JPEG format
+- Current Linux-side 1080p implementation status:
+  - Bulk command layout has been aligned with capture (`more_fragments` byte at offset 20).
+  - `0x31` software-ready request is sent during probe.
+  - A `trigger6_type7_video_header` struct has been added for the JPEG tile path.
+  - The actual framebuffer update path still sends BGR24-style full frames. The next functional step is to replace or bypass it with a JPEG encoder/test payload path that emits `type=0x7 format=0x0d` payloads.
+- interrupt はほぼ `flags=0x04 event=0x04` で、`value` は `0x21b8`, `0x21b9`, ... のように増える。fence ID 仮説と整合する。
+- `2026-06-19_jua365_win_03_resolution_change.pcapng` は resolution change attempt。capture 内には `0x12` detailed timing や `0x08` set resolution by index は出ていない。control transfer も descriptor/config 系だけで、Windows driver がモード変更を vendor control request として流している様子はこの capture には見えない。
+- 同 capture の video tile は全て `canvas=1920x1920`。前半は `64x1080` の縦 tile が中心で、32s 付近に `1216x192`, `320x224`, `64x288` などの小さい dirty update がまとまって出る。これは Windows の設定画面/確認 UI の描画変化を反映した可能性が高く、出力 timing の切替そのものを示す packet はまだ特定できていない。
+- 4K + 1080p 混在 capture は巨大なため、先頭/中盤を `editcap` で切り出して解析した。control transfer 側では `0x10` timing/read 系が `wValue=0..4` に対して繰り返し出ており、単一出力時より多くの output/timing slot を見ている。`0x80` EDID read は output 0/1 で確認できる。
+- 同 capture の中盤切り出しでは、拾えた video payload は `type=0x4 format=0x0d jpeg=1920x1080` と `type=0x7 format=0x0d jpeg=1920x736`。現時点の parser で見えている video stream は 4K full frame ではなく、1080p 系の面を送っているように見える。4K 側が別 session / 別 header layout / 別 output slot で流れている可能性が残る。
+- 4K only capture では `session=7` の bulk command が継続的に出る。既存の 1080p/JPEG path と違い、command 直後の payload は `6144` bytes や `1044480` bytes の大きな blob で、JPEG SOI は見えない。例:
+  - command frame `24935`: `07 00 00 00 00 18 00 00 ...` の直後に `6144` bytes payload。
+  - command frame `24939`: `07 00 00 00 00 e4 1b 00 ...` の直後に `1044480` bytes payload。
+- したがって 4K path は、少なくとも Windows capture では従来の `session=0 type=0x7 format=0x0d JPEG tile` ではなく、`session=7` の別 payload format を使っている可能性が高い。Linux driver 側で 4K 対応するなら、JPEG path だけでなくこの session 7 path の解読が必要になる。
+- `session=7` command の 6th dword は packed width/height と見てよい。`low16=width`, `high16=height` とすると、確認した全 command で `total_len == width * height * 3 / 2` が成立した。つまり payload は YUV420/NV12/I420 系の raw rectangle である可能性が高い。
+- 4K only mid cut で見えた `session=7` dimensions:
+  - `64x64`, `total=0x1800`, count 35
+  - `2720x448`, `total=0x1be400`, count 33
+  - `2656x64`, `total=0x3e400`, count 16
+  - `384x384`, `total=0x36000`, count 2
+  - `32x64`, `total=0x0c00`, count 1
+- 例: command raw `07 00 00 00 00 e4 1b 00 30 a3 5f 00 30 63 ae 00 00 0f 00 0f a0 0a c0 01 ...` は `total=0x1be400`, `width=0x0aa0=2720`, `height=0x01c0=448`。`2720 * 448 * 3 / 2 = 0x1be400`。
+- USBPcap/tshark default capture は large payload を `frame.cap_len=65535` で切る。`tshark -s 0` でも USBPcap extcap 経由では改善しなかった。full payload を取るには `USBPcapCMD.exe` を直接使い、`-A -s 2000000 -b 134217728` のように snaplen を指定する必要がある。
+- `USBPcapCMD.exe` high-snaplen capture では `frame.cap_len == frame.len` の full payload が取れる。確認例: `test_usbpcapcmd_snap2m_motion.pcap` の frame `151186` は `session=7`, `total=0x15c00`, packed size `64x928`; 直後の frame `151188` は payload `89088` bytes で、`64 * 928 * 3 / 2` と一致する。抽出して Y plane を grayscale preview すれば、NV12/I420 のどちらかを判定できるはず。
+- frame `151188` payload を抽出して preview 済み:
+  - raw: `captures/session7_frame151188_64x928_yuv420.raw`
+  - Y plane: `captures/session7_frame151188_64x928_y_plane.png`
+  - NV12 color: `captures/session7_frame151188_64x928_nv12.png`
+  - I420 color: `captures/session7_frame151188_64x928_i420.png`
+- Y plane には文字/背景が正常に見える。NV12 color は自然、I420 color は色ノイズが強い。したがって `session=7` 4K path の payload format は NV12 raw rectangle と見るのが現時点で最も妥当。
+- `test_usbpcapcmd_snap2m_motion.pcap` から `session=7` command を抽出し、CSV/preview を作成:
+  - command TSV: `captures/session7_commands_test_usbpcapcmd_snap2m_motion.tsv`
+  - rect CSV: `captures/session7_rects_test_usbpcapcmd_snap2m_motion.csv`
+  - second preview: `captures/session7_frame203538_64x928_nv12.png`
+- high-snaplen motion capture 内の `session=7` は 2 件だけで、どちらも `64x928`, `total=0x15c00`, NV12 size と一致する。2枚の preview はほぼ同じ縦長 UI 領域で、異なる `addr1/addr2` はダブルバッファ/リングバッファ上の別領域を指している可能性が高い。
+- default-snaplen の `captures/2026-06-19_jua365_win_07_4k_only_mid40k.pcapng` から command metadata を CSV 化:
+  - `captures/session7_commands_07_4k_only_mid40k.csv`
+  - rows: 87
+  - dimensions: `64x64` count 35, `2720x448` count 33, `2656x64` count 16, `384x384` count 2, `32x64` count 1
+  - all command sizes satisfy `total_len == width * height * 3 / 2`
+- address groups show repeated address pairs:
+  - `2720x448`: `addr1=0x05fa330 addr2=0x0ae6330` count 16, and `addr1=0x124f890 addr2=0x173b890` count 17; both have `addr2-addr1=0x4ec000`
+  - `2656x64`: `addr1=0x0ccd6b0 addr2=0x147a6b0`, `addr2-addr1=0x7ad000`
+  - many `64x64` rects have `addr2-addr1=0x735000` or `0x7ad000`
+- `addr1/addr2` are not yet proven screen coordinates. Treat them as VRAM/buffer addresses first. Subtracting the minimum `addr1=0x78150` and testing stride candidates gives some plausible alignments, but no single stride cleanly explains all rectangles. More full-snaplen rect previews are needed to infer exact placement/stride.
+- Existing captures are not enough to reconstruct a complete 4K frame. The only full high-snaplen `session=7` payloads currently available are two `64x928` rects from `test_usbpcapcmd_snap2m_motion.pcap`.
+- Default-snaplen 4K captures still contain useful prefixes of large rects. Preview artifacts:
+  - `captures/session7_truncated_large_rect_previews.csv`
+  - `captures/session7_truncated_frame24941_2720x448_a_y_rows24.png`: first 24 Y rows of a `2720x448` NV12 rect; visible text confirms the rect interpretation.
+  - `captures/session7_truncated_frame37947_384x384_a_y_rows170.png`: first 170 Y rows of a `384x384` NV12 rect; UI card/text are visible.
+- The `2656x64` command at frame `37591` (`total=0x3e400`, packed size `2656x64`) does not have an obvious immediate payload in the truncated capture, so either payload association is more complex for that packet, the transfer was skipped/completed differently, or the current command pairing heuristic is incomplete.
+
+Deferred 4K follow-up:
+
+- Do not block the 1080p/JPEG path on 4K. Treat 4K as a separate `session=7` NV12 path.
+- When the device is available again, capture 4K with `USBPcapCMD.exe` directly, not Wireshark extcap:
+  - `USBPcapCMD.exe -d \\.\USBPcap1 -A -s 2000000 -b 134217728 -o captures/<name>.pcap`
+  - Move a large high-contrast window on the 4K output during capture to force `2720x448` / larger rects.
+- For analysis, extract full `session=7` rects, render both Y plane and NV12 color, then infer:
+  - whether `addr1` or `addr2` is the destination VRAM address
+  - screen coordinate / stride mapping for rect placement
+  - fence interrupt mapping for `session=7`
+- A complete 4K frame reconstruction needs enough full-snaplen rects to cover the screen or a known full-screen update. Current captures are sufficient for format identification, not full-frame assembly.
+
+### Windows enumeration no HDMI control sequence
+
+`captures/2026-06-19_jua365_win_01_enumeration_no_hdmi_retry.pcapng` は JUA365 を抜いた状態から挿し直した full enumeration。USB address は `25`。HDMI 未接続なので session 0 bulk video は出ず、interrupt は audio/status 系らしい `flags=0x20 event=0x00` が 2 回だけ出た。
+
+descriptor 後の vendor/control sequence:
+
+```text
+IN  0xb0 wValue=0x0000 wIndex=1 len=4
+IN  0xb0 wValue=0x0000 wIndex=2 len=4
+IN  0xb0 wValue=0x0000 wIndex=4 len=4
+IN  0xb0 wValue=0x0000 wIndex=0 len=4
+IN  0xb0 wValue=0x0000 wIndex=5 len=8
+IN  0xb4 wValue=0x0000 wIndex=0 len=4
+IN  0xb0 wValue=0x0000 wIndex=3 len=16
+IN  0xcc wValue=0x0001 wIndex=0 len=104
+IN  0xb1 wValue=0x0000 wIndex=0 len=132
+IN  0xb1 wValue=0x0000 wIndex=3 len=132
+IN  0xa1 wValue=0x0000 wIndex=0 len=16
+IN  0xa4 wValue=0x0000 wIndex=0 len=16
+IN  0xa1 wValue=0x0000 wIndex=1 len=16
+IN  0xa5 wValue=0x0000 wIndex=0 len=32
+IN  0xa2 wValue=0x0000 wIndex=0 len=16
+IN  0xa3 wValue=0x0000 wIndex=0 len=40
+OUT 0x23 wValue=0x0000 wIndex=0 len=40
+IN  0xb3 wValue=0x0000 wIndex=0 len=112
+IN  0x88 wValue=0x0000 wIndex=0 len=1
+OUT 0x1c wValue=0x0000 wIndex=0 len=0
+OUT 0x1c wValue=0x0100 wIndex=0 len=0
+OUT 0x31 wValue=0x0000 wIndex=0 len=0
+OUT 0x24 wValue=0x0000 wIndex=0 len=16
+IN  0x89 wValue=0x0000 wIndex=0 len=512
+IN  0x89 wValue=0x0000 wIndex=512 len=512
+IN  0x89 wValue=0x0000 wIndex=1024 len=128
+IN  0x89 wValue=0x0001 wIndex=0 len=512
+IN  0x89 wValue=0x0001 wIndex=512 len=448
+IN  0x87 wValue=0x0000 wIndex=0 len=1
+IN  0x87 wValue=0x0001 wIndex=0 len=1
+```
+
+観察:
+
+- `0x31` software ready は Windows でも display session 用に `wValue=0`, `wIndex=0` で送られる。
+- `0x89` timing table は output 0 と output 1 の両方を読む。output 0 は `512 + 512 + 128 = 1152` bytes、output 1 は `512 + 448 = 960` bytes。
+- `0x87` connector status も output 0 / output 1 の両方を見る。
+- HDMI 未接続のため EDID request `0x80` はこの capture には見えていない。
+
 ## Software ready request
 
 `T6_send_software_ready_commands` から、`0x31` request は少し確度が上がった。
@@ -361,3 +613,78 @@ video interrupt の2値は、user-space 側の文字列から見ると `JPEG_ERR
    - Mac とは違う display pipeline でも、USB protocol の実例として有用。
 4. 既存 `captures/mctt6.pcapng` の再解析。
    - command phase と payload header を Wireshark dissector の推測と照合する。
+## Ubuntu T6 official driver package notes
+
+`ubuntu_T6_260223.run` is a self-extracting POSIX shell installer. The first
+114 lines are installer logic; line 115 onward is a gzip tar archive containing:
+
+- `evdi.tar.gz`
+- `evdi_t6.tar.gz`
+
+The vendor Linux stack is not a native T6 DRM/KMS kernel driver. It builds and
+installs EVDI, then runs a user-space daemon (`T6evdi`) that connects EVDI
+updates to the T6 device through libusb.
+
+Important protocol definitions from `evdi_t6_1/t6.h` and `t6bulkdef.h`:
+
+- Bulk OUT endpoint: `0x02`
+- Bulk IN endpoint: `0x81`
+- Interrupt IN endpoint: `0x83`
+- `VENDOR_REQ_SET_SOFTWARE_READY = 0x31`
+- `VENDOR_REQ_SET_RESOLUTION_DETAIL_TIMING = 0x12`
+- `VENDOR_REQ_GET_EDID = 0x80`
+- `VENDOR_REQ_QUERY_MONITOR_CONNECTION_STATUS = 0x87`
+- `VENDOR_REQ_QUERY_VIDEO_RAM_SIZE = 0x88`
+- `VENDOR_REQ_QUERY_SECTION_DATA = 0xb3`
+- `VIDEO_COLOR_JPEG = 13`
+- `VIDEO_COLOR_NV12 = 6`
+- `VIDEO_COLOR_YV12 = 4`
+- `VIDEO_CMD_FLIP_PRIMARY = 3`
+- `VIDEO_CMD_FLIP_SECONDARY = 4`
+
+The 32-byte bulk command header matches the current reverse-engineered command
+shape:
+
+```c
+struct bulk_cmd_header {
+    u32 signature;
+    u32 payload_length;
+    u32 payload_address;
+    u32 packet_length;
+    u32 reserved2;
+    u32 reserved3;
+    u8 padding[8];
+} __packed;
+```
+
+`t6_libusb_FilpJpegFrame()` sends a bulk command with `signature=0`,
+`payload_address=t6dev->cmdAddr`, then sends a 48-byte `VIDEO_FLIP_HEADER`
+followed by JPEG bytes and 1024 bytes of padding. The flip header sets
+`TargetFormat=VIDEO_COLOR_NV12`, `SourceFormat=VIDEO_COLOR_JPEG`,
+`Y_RGB_Pitch=align32(width)`, `UV_Pitch=align32(width)`, Y offset to
+`t6dev->fbAddr`, UV offset to `fbAddr + aligned_y_plane_size + 1024`, and uses
+`Flag=0x80` as the JPEG reset flag during initial frames / command ring wrap.
+
+For non-4K mode in the default build, `usb_process()` uses JPEG:
+
+- `!bRun4K30` -> `t6_libusb_FilpJpegFrame(...)`
+- `bRun4K30` -> `t6_libusb_FilpYV12Frame(...)`
+
+The source comments document VRAM layout. For one-port 1080p output:
+
+- `cmdAddr = 0x0000000`
+- `fbAddr1 = (ramsize - 12) MiB`
+- `fbAddr2 = (ramsize - 8) MiB`
+- `fbAddr3 = (ramsize - 4) MiB`
+
+For the observed 58 MiB RAM size this corresponds to:
+
+- `fbAddr1 = 0x2e00000`
+- `fbAddr2 = 0x3200000`
+- `fbAddr3 = 0x3600000`
+
+This explains the Windows capture addresses around `0x32xxxxxx` and confirms
+that the earlier BGR/RGB565 full-frame Linux path is not the right 1080p path.
+The next implementation target should be an EVDI/libusb-style user-space path,
+or at least a Linux kernel bulk sender that emits the same `VIDEO_FLIP_HEADER +
+JPEG + padding` payload.

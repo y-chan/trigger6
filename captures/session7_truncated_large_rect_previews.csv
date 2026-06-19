@@ -1,0 +1,3 @@
+cmd_frame,payload_frame,width,height,usb_len,frame_cap_len,capdata_len,y_rows,png
+24939,24941,2720,448,1044480,65535,65508,24,captures/session7_truncated_frame24941_2720x448_a_y_rows24.png
+37945,37947,384,384,221184,65535,65508,170,captures/session7_truncated_frame37947_384x384_a_y_rows170.png

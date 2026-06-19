@@ -49,6 +49,7 @@ class BulkCommand:
 class VideoHeader:
     frame: int
     time: str
+    session: int
     command_frame: int
     payload_len: int
     video_type: int
@@ -57,6 +58,8 @@ class VideoHeader:
     flags_or_format_hint: int
     width_field: int
     height_field: int
+    canvas_width: int | None
+    canvas_height: int | None
     start_addr: int
     end_addr: int
     image_format: int
@@ -215,20 +218,24 @@ def parse_bulk_command(packet: UsbPacket) -> BulkCommand | None:
 def parse_video_header(packet: UsbPacket, command: BulkCommand) -> VideoHeader | None:
     if len(packet.capdata) < VIDEO_HEADER_LEN:
         return None
-    (
-        video_type,
-        data_len,
-        sequence,
-        flags_or_format_hint,
-        width_field,
-        height_field,
-        start_addr,
-        end_addr,
-        _unk9,
-        image_format,
-    ) = struct.unpack_from("<IIIIHHIIII", packet.capdata, 0)
+    video_type, data_len, sequence, flags_or_format_hint = struct.unpack_from(
+        "<IIII", packet.capdata, 0
+    )
+    width_field, height_field = struct.unpack_from("<HH", packet.capdata, 0x10)
     if video_type not in KNOWN_VIDEO_TYPES:
         return None
+    if video_type == 0x07:
+        canvas_packed, start_addr, end_addr, _unk9, image_format = struct.unpack_from(
+            "<IIIII", packet.capdata, 0x14
+        )
+        canvas_width = canvas_packed & 0xFFFF
+        canvas_height = canvas_packed >> 16
+    else:
+        start_addr, end_addr, _unk9, image_format = struct.unpack_from(
+            "<IIII", packet.capdata, 0x14
+        )
+        canvas_width = None
+        canvas_height = None
     if image_format not in KNOWN_IMAGE_FORMATS:
         return None
     if data_len > packet.data_len:
@@ -243,6 +250,7 @@ def parse_video_header(packet: UsbPacket, command: BulkCommand) -> VideoHeader |
     return VideoHeader(
         frame=packet.frame,
         time=packet.time,
+        session=command.session,
         command_frame=command.frame,
         payload_len=packet.data_len,
         video_type=video_type,
@@ -251,6 +259,8 @@ def parse_video_header(packet: UsbPacket, command: BulkCommand) -> VideoHeader |
         flags_or_format_hint=flags_or_format_hint,
         width_field=width_field,
         height_field=height_field,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
         start_addr=start_addr,
         end_addr=end_addr,
         image_format=image_format,
@@ -277,6 +287,7 @@ def print_video(header: VideoHeader) -> None:
     print(
         "video\t"
         f"{header.frame}\t{header.time}\t"
+        f"session={header.session}\t"
         f"cmd_frame={header.command_frame}\t"
         f"payload=0x{header.payload_len:x}\t"
         f"type=0x{header.video_type:x}\t"
@@ -285,6 +296,7 @@ def print_video(header: VideoHeader) -> None:
         f"hint=0x{header.flags_or_format_hint:x}\t"
         f"width_field=0x{header.width_field:x}\t"
         f"height_field=0x{header.height_field:x}\t"
+        f"canvas={header.canvas_width}x{header.canvas_height}\t"
         f"start=0x{header.start_addr:x}\t"
         f"end=0x{header.end_addr:x}\t"
         f"format=0x{header.image_format:x}\t"
@@ -314,6 +326,7 @@ def summarize(args: argparse.Namespace) -> int:
     interrupt_counts = collections.Counter()
     pending: BulkCommand | None = None
     commands = videos = interrupts = 0
+    printed = 0
 
     for packet in packets:
         if packet.endpoint == args.bulk_out and packet.capdata:
@@ -322,26 +335,39 @@ def summarize(args: argparse.Namespace) -> int:
                 commands += 1
                 command_counts[(command.session, command.dest)] += 1
                 pending = command
-                if not args.summary_only:
+                if not args.summary_only and not args.video_only and (
+                    args.limit is None or printed < args.limit
+                ):
                     print_command(command)
+                    printed += 1
                 continue
 
-            if pending and pending.session == 0:
+            if pending:
                 header = parse_video_header(packet, pending)
                 if header is not None:
                     videos += 1
                     video_counts[(header.video_type, header.image_format)] += 1
-                    if not args.summary_only:
+                    if not args.summary_only and (
+                        args.limit is None or printed < args.limit
+                    ):
                         print_video(header)
+                        printed += 1
                 pending = None
 
         if packet.endpoint == args.interrupt_in and packet.data_len == 64 and packet.capdata:
             interrupts += 1
-            flags, _value, event = print_interrupt(packet) if not args.summary_only else (
+            should_print_interrupt = (
+                not args.summary_only
+                and not args.video_only
+                and (args.limit is None or printed < args.limit)
+            )
+            flags, _value, event = print_interrupt(packet) if should_print_interrupt else (
                 packet.capdata[0],
                 struct.unpack_from("<I", packet.capdata, 0x0C)[0],
                 packet.capdata[0x13],
             )
+            if should_print_interrupt:
+                printed += 1
             interrupt_counts[(flags, event)] += 1
 
     print("# summary")
@@ -370,6 +396,8 @@ def main() -> int:
         "--interrupt-in", type=lambda s: int(s, 0), default=DEFAULT_INTERRUPT_IN
     )
     parser.add_argument("--summary-only", action="store_true")
+    parser.add_argument("--video-only", action="store_true")
+    parser.add_argument("--limit", type=int)
     return summarize(parser.parse_args())
 
 

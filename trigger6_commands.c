@@ -13,6 +13,17 @@ int trigger6_read_modes(struct trigger6_device *trigger6, int output_index,
 	return ret;
 }
 
+int trigger6_send_software_ready(struct trigger6_device *trigger6,
+				 int session_number)
+{
+	struct usb_interface *intf = trigger6->intf;
+	struct usb_device *usb_dev = interface_to_usbdev(intf);
+
+	return usb_control_msg(usb_dev, usb_sndctrlpipe(usb_dev, 0), 0x31,
+			       USB_TYPE_VENDOR, session_number, 0, NULL, 0,
+			       USB_CTRL_SET_TIMEOUT);
+}
+
 int trigger6_read_connector_status(struct trigger6_device *trigger6,
 				   int output_index)
 {
@@ -22,13 +33,22 @@ int trigger6_read_connector_status(struct trigger6_device *trigger6,
 
 	u8 *status;
 	status = kmalloc(1, GFP_KERNEL);
+	if (!status)
+		return -ENOMEM;
 
 	ret = usb_control_msg(usb_dev, usb_rcvctrlpipe(usb_dev, 0), 0x87,
 			      USB_DIR_IN | USB_TYPE_VENDOR, output_index, 0,
 			      status, 1, USB_CTRL_GET_TIMEOUT);
 
-	if (ret < 0)
+	if (ret < 0) {
+		kfree(status);
 		return ret;
+	}
+
+	if (ret != 1) {
+		kfree(status);
+		return -EIO;
+	}
 
 	ret = *status;
 	kfree(status);

@@ -17,9 +17,9 @@
 #define DRIVER_MINOR 0
 #define DRIVER_PATCHLEVEL 1
 
-#define TRIGGER6_ENDPOINT_BULK_IN	0x1
-#define TRIGGER6_ENDPOINT_BULK_OUT	0x2
-#define TRIGGER6_ENDPOINT_INTERRUPT_IN	0x3
+#define TRIGGER6_EP_BULK_IN		0x1
+#define TRIGGER6_EP_BULK_OUT		0x2
+#define TRIGGER6_EP_INTERRUPT_IN	0x3
 
 #define TRIGGER6_MAX_TRANSFER_LENGTH 0x19000
 
@@ -42,15 +42,16 @@ struct trigger6_mode {
 	u16 unk11;
 } __attribute__((packed));
 
-struct trigger6_session {
+struct trigger6_bulk_command {
 	__le32 session_number;
 	__le32 payload_length;
 	__le32 dest_addr;
 	__le32 fragment_length;
 	__le32 offset;
-	__le32 output_index;
-	__le32 unk7;
-	__le32 unk8;
+	u8 more_fragments;
+	u8 reserved0[3];
+	__le32 reserved1;
+	__le32 reserved2;
 } __attribute__((packed));
 
 #define TRIGGER6_JPEG_FORMAT 0xD
@@ -58,12 +59,12 @@ struct trigger6_session {
 #define TRIGGER6_BGR24_FORMAT 0x9
 
 struct trigger6_video_header {
-	__le32 type; // 0x3 = full, 0x4 = partial?, 0x7 = partial??
+	__le32 type; // 0x3 = full, 0x4 = partial?, 0x7 = JPEG tile update
 	__le32 data_length;
 	__le32 sequence_counter;
 	__le32 unk4;	// values seen: 6, 9
-	__le16 width;	// or height
-	__le16 height;	// or width
+	__le16 width;
+	__le16 height;
 	__le32 start_address;
 	__le32 end_address;
 	__le32 unk9;
@@ -71,6 +72,23 @@ struct trigger6_video_header {
 	__le32 unk11;
 	__le32 unk12;
 	__le32 unk13;
+} __attribute__((packed));
+
+struct trigger6_type7_video_header {
+	__le32 type;
+	__le32 data_length;
+	__le32 sequence_counter;
+	__le32 flags;
+	__le16 width;
+	__le16 height;
+	__le16 canvas_width;
+	__le16 canvas_height;
+	__le32 start_address;
+	__le32 end_address;
+	__le32 reserved0;
+	__le32 image_format;
+	__le32 reserved1;
+	__le32 reserved2;
 } __attribute__((packed));
 
 struct trigger6_device {
@@ -102,6 +120,7 @@ int trigger6_set_resolution(struct trigger6_device *trigger6,
 
 int trigger6_read_modes(struct trigger6_device *trigger6, int output_index, int byte_offset, void* data, int length);
 int trigger6_read_connector_status(struct trigger6_device *trigger6, int output_index);
+int trigger6_send_software_ready(struct trigger6_device *trigger6, int session_number);
 void trigger6_free_urb(struct trigger6_device *trigger6);
 int trigger6_init_urb(struct trigger6_device *trigger6, size_t total_size);
 int trigger6_enable_output(struct trigger6_device *trigger6);

@@ -1,0 +1,39 @@
+// Copyright (c) 2022 DisplayLink (UK) Ltd.
+pipeline {
+    agent {
+        dockerfile {
+            filename 'src/Dockerfile'
+            label 'linux && big && docker'
+        }
+    }
+    stages {
+        stage ('Generate stages') {
+            steps {
+                dir('src') {
+                    script {
+                     sh '''#!/usr/bin/env bash
+                       git remote add github "https://github.com/DisplayLink/evdi.git"
+                       git fetch github
+                     '''
+
+                      def list = [ "origin/main", "github/main" ]
+                      for(int i=0; i < list.size(); i++) {
+                        def branchName = list[i];
+                        stage(branchName) {
+                            withEnv(["STAGE_BRANCH=$branchName"]) {
+                            sh '''#!/usr/bin/env bash
+                              set -e
+                              git checkout ${STAGE_BRANCH}
+                              ./ci/build_against_kernel --repo-ci master
+                              ./ci/build_against_kernel --repo-ci rc
+                              ./ci/build_against_kernel --repo-ci all
+                              '''
+                            }
+                        }
+                      }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -188,10 +188,17 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 
 		size_t blocks =
 			DIV_ROUND_UP(buf_size, TRIGGER6_MAX_TRANSFER_LENGTH);
-		struct trigger6_session *session =
-			kzalloc(sizeof(struct trigger6_session), GFP_KERNEL);
+		struct trigger6_bulk_command *command =
+			kzalloc(sizeof(struct trigger6_bulk_command), GFP_KERNEL);
 		void *transfer_block =
 			kmalloc(TRIGGER6_MAX_TRANSFER_LENGTH, GFP_KERNEL);
+
+		if (!command || !transfer_block) {
+			kfree(command);
+			kfree(transfer_block);
+			vfree(buf);
+			return;
+		}
 
 		for (size_t i = 0; i < blocks; i++) {
 			size_t offset = i * TRIGGER6_MAX_TRANSFER_LENGTH;
@@ -199,18 +206,18 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 				min((i + 1) * TRIGGER6_MAX_TRANSFER_LENGTH,
 				    buf_size) -
 				offset;
-			session->session_number = 0;
-			session->payload_length = cpu_to_le32(buf_size);
-			session->dest_addr = cpu_to_le32(0x030);
-			session->fragment_length = cpu_to_le32(length);
-			session->output_index = cpu_to_le32(0x0);
-			session->offset = cpu_to_le32(offset);
+			command->session_number = cpu_to_le32(0);
+			command->payload_length = cpu_to_le32(buf_size);
+			command->dest_addr = cpu_to_le32(0x030);
+			command->fragment_length = cpu_to_le32(length);
+			command->offset = cpu_to_le32(offset);
+			command->more_fragments = i + 1 < blocks;
 
 			ret = usb_bulk_msg(
 				usb_dev,
 				usb_sndbulkpipe(usb_dev,
-						TRIGGER6_ENDPOINT_BULK_OUT),
-				session, sizeof(struct trigger6_session), NULL,
+						TRIGGER6_EP_BULK_OUT),
+				command, sizeof(struct trigger6_bulk_command), NULL,
 				5000);
 			if (ret < 0) {
 				drm_warn(&trigger6->drm,
@@ -221,7 +228,7 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 			ret = usb_bulk_msg(
 				usb_dev,
 				usb_sndbulkpipe(usb_dev,
-						TRIGGER6_ENDPOINT_BULK_OUT),
+						TRIGGER6_EP_BULK_OUT),
 				transfer_block, length, NULL, 5000);
 
 			if (ret < 0) {
@@ -230,7 +237,7 @@ static void trigger6_pipe_update(struct drm_simple_display_pipe *pipe,
 			}
 		}
 
-		kfree(session);
+		kfree(command);
 		kfree(transfer_block);
 		vfree(buf);
 	}
@@ -281,10 +288,27 @@ static int trigger6_usb_probe(struct usb_interface *interface,
 	dev->mode_config.max_height = 10000;
 	dev->mode_config.funcs = &trigger6_mode_config_funcs;
 
+	ret = trigger6_send_software_ready(trigger6, 0);
+	if (ret < 0)
+		drm_warn(dev, "display ready request failed: %d\n", ret);
+
 	// Might need
 	// trigger6_init_urb(trigger6, 100 * TRIGGER6_MAX_TRANSFER_LENGTH);
-	trigger6_read_modes(trigger6, 0, 0, trigger6->modes, 512);
-	trigger6_read_modes(trigger6, 0, 512, trigger6->modes + 16, 448);
+	ret = trigger6_read_modes(trigger6, 0, 0, trigger6->modes, 512);
+	if (ret < 0)
+		goto err_put_device;
+	if (ret != 512) {
+		ret = -EIO;
+		goto err_put_device;
+	}
+
+	ret = trigger6_read_modes(trigger6, 0, 512, trigger6->modes + 16, 448);
+	if (ret < 0)
+		goto err_put_device;
+	if (ret != 448) {
+		ret = -EIO;
+		goto err_put_device;
+	}
 
 	for (int i = 0; i < ARRAY_SIZE(trigger6->modes); i++) {
 		drm_warn(dev, "mode %d: %dx%d@%d\n", i,

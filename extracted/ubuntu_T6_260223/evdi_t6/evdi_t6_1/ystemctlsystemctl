@@ -1,0 +1,102 @@
+[0m[0;4m [0m[0m[0;4m UNIT                                                                                    [0m[0m[0;4m LOAD  [0m[0m[0;4m ACTIVE    [0m[0m[0;4m SUB      [0m[0m[0;4m DESCRIPTION                                                                  [0m
+[0m[0;4m [0m[0m[0;4m [0m[0m[0;4mproc-sys-fs-binfmt_misc.automount                                                       [0m[0m[0;4m [0m[0m[0;4mloaded[0m[0m[0;4m [0m[0m[0;4mactive    [0m[0m[0;4m [0m[0m[0;4mrunning  [0m[0m[0;4m [0m[0m[0;4mArbitrary Executable File Formats File System Automount Point                [0m
+  dev-loop8.device                                                                         loaded activating tentative /dev/loop8
+  sys-devices-pci0000:00-0000:00:14.0-usb1-1\x2d8-1\x2d8:1.0-bluetooth-hci0.device         loaded active     plugged   /sys/devices/pci0000:00/0000:00:14.0/usb1/1-8/1-8:1.0/bluetooth/hci0
+  sys-devices-pci0000:00-0000:00:16.3-tty-ttyS4.device                                     loaded active     plugged   Sunrise Point-LP Active Management Technology - SOL
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda-sda1.device loaded active     plugged   SanDisk_SDSSDH3_1T00 EFI\x20System\x20Partition
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda-sda2.device loaded active     plugged   SanDisk_SDSSDH3_1T00 2
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda-sda3.device loaded active     plugged   SanDisk_SDSSDH3_1T00 3
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda-sda4.device loaded active     plugged   SanDisk_SDSSDH3_1T00 4
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda-sda5.device loaded active     plugged   SanDisk_SDSSDH3_1T00 5
+  sys-devices-pci0000:00-0000:00:17.0-ata1-host0-target0:0:0-0:0:0:0-block-sda.device      loaded active     plugged   SanDisk_SDSSDH3_1T00
+  sys-devices-pci0000:00-0000:00:1c.0-0000:01:00.0-net-wlp1s0.device                       loaded active     plugged   Wireless 8265 / 8275 (Dual Band Wireless-AC 8265)
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p1.device     loaded active     plugged   PLEXTOR PX-512M9PeG EFI\x20System\x20Partition
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p2.device     loaded active     plugged   PLEXTOR PX-512M9PeG 2
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p3.device     loaded active     plugged   PLEXTOR PX-512M9PeG 3
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p4.device     loaded active     plugged   PLEXTOR PX-512M9PeG 4
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p5.device     loaded active     plugged   PLEXTOR PX-512M9PeG 5
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p6.device     loaded active     plugged   PLEXTOR PX-512M9PeG 6
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p7.device     loaded active     plugged   PLEXTOR PX-512M9PeG 7
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1-nvme0n1p8.device     loaded active     plugged   PLEXTOR PX-512M9PeG 8
+  sys-devices-pci0000:00-0000:00:1d.0-0000:02:00.0-nvme-nvme0-nvme0n1.device               loaded active     plugged   PLEXTOR PX-512M9PeG
+  sys-devices-pci0000:00-0000:00:1f.3-sound-card0-controlC0.device                         loaded active     plugged   /sys/devices/pci0000:00/0000:00:1f.3/sound/card0/controlC0
+  sys-devices-pci0000:00-0000:00:1f.6-net-eno1.device                                      loaded active     plugged   Ethernet Connection I219-LM
+  sys-devices-platform-MSFT0101:00-tpm-tpm0.device                                         loaded active     plugged   /sys/devices/platform/MSFT0101:00/tpm/tpm0
+  sys-devices-platform-MSFT0101:00-tpmrm-tpmrm0.device                                     loaded active     plugged   /sys/devices/platform/MSFT0101:00/tpmrm/tpmrm0
+  sys-devices-platform-serial8250-tty-ttyS1.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS1
+  sys-devices-platform-serial8250-tty-ttyS10.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS10
+  sys-devices-platform-serial8250-tty-ttyS11.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS11
+  sys-devices-platform-serial8250-tty-ttyS12.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS12
+  sys-devices-platform-serial8250-tty-ttyS13.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS13
+  sys-devices-platform-serial8250-tty-ttyS14.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS14
+  sys-devices-platform-serial8250-tty-ttyS15.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS15
+  sys-devices-platform-serial8250-tty-ttyS16.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS16
+  sys-devices-platform-serial8250-tty-ttyS17.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS17
+  sys-devices-platform-serial8250-tty-ttyS18.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS18
+  sys-devices-platform-serial8250-tty-ttyS19.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS19
+  sys-devices-platform-serial8250-tty-ttyS2.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS2
+  sys-devices-platform-serial8250-tty-ttyS20.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS20
+  sys-devices-platform-serial8250-tty-ttyS21.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS21
+  sys-devices-platform-serial8250-tty-ttyS22.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS22
+  sys-devices-platform-serial8250-tty-ttyS23.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS23
+  sys-devices-platform-serial8250-tty-ttyS24.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS24
+  sys-devices-platform-serial8250-tty-ttyS25.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS25
+  sys-devices-platform-serial8250-tty-ttyS26.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS26
+  sys-devices-platform-serial8250-tty-ttyS27.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS27
+  sys-devices-platform-serial8250-tty-ttyS28.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS28
+  sys-devices-platform-serial8250-tty-ttyS29.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS29
+  sys-devices-platform-serial8250-tty-ttyS3.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS3
+  sys-devices-platform-serial8250-tty-ttyS30.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS30
+  sys-devices-platform-serial8250-tty-ttyS31.device                                        loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS31
+  sys-devices-platform-serial8250-tty-ttyS5.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS5
+  sys-devices-platform-serial8250-tty-ttyS6.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS6
+  sys-devices-platform-serial8250-tty-ttyS7.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS7
+  sys-devices-platform-serial8250-tty-ttyS8.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS8
+  sys-devices-platform-serial8250-tty-ttyS9.device                                         loaded active     plugged   /sys/devices/platform/serial8250/tty/ttyS9
+  sys-devices-pnp0-00:01-tty-ttyS0.device                                                  loaded active     plugged   /sys/devices/pnp0/00:01/tty/ttyS0
+  sys-devices-virtual-block-dm\x2d0.device                                                 loaded active     plugged   /sys/devices/virtual/block/dm-0
+  sys-devices-virtual-block-dm\x2d1.device                                                 loaded active     plugged   /sys/devices/virtual/block/dm-1
+  sys-devices-virtual-block-dm\x2d2.device                                                 loaded active     plugged   /sys/devices/virtual/block/dm-2
+  sys-devices-virtual-block-loop0.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop0
+  sys-devices-virtual-block-loop1.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop1
+  sys-devices-virtual-block-loop2.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop2
+  sys-devices-virtual-block-loop3.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop3
+  sys-devices-virtual-block-loop4.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop4
+  sys-devices-virtual-block-loop5.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop5
+  sys-devices-virtual-block-loop6.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop6
+  sys-devices-virtual-block-loop7.device                                                   loaded active     plugged   /sys/devices/virtual/block/loop7
+  sys-devices-virtual-misc-rfkill.device                                                   loaded active     plugged   /sys/devices/virtual/misc/rfkill
+  sys-devices-virtual-tty-ttyprintk.device                                                 loaded active     plugged   /sys/devices/virtual/tty/ttyprintk
+  sys-module-configfs.device                                                               loaded active     plugged   /sys/module/configfs
+  sys-module-fuse.device                                                                   loaded active     plugged   /sys/module/fuse
+  sys-subsystem-bluetooth-devices-hci0.device                                              loaded active     plugged   /sys/subsystem/bluetooth/devices/hci0
+  sys-subsystem-net-devices-eno1.device                                                    loaded active     plugged   Ethernet Connection I219-LM
+[0m[0;4m [0m[0m[0;4m [0m[0m[0;4msys-subsystem-net-devices-wlp1s0.device                                                 [0m[0m[0;4m [0m[0m[0;4mloaded[0m[0m[0;4m [0m[0m[0;4mactive    [0m[0m[0;4m [0m[0m[0;4mplugged  [0m[0m[0;4m [0m[0m[0;4mWireless 8265 / 8275 (Dual Band Wireless-AC 8265)                            [0m
+  -.mount                                                                                  loaded active     mounted   Root Mount
+  boot-efi.mount                                                                           loaded active     mounted   /boot/efi
+  dev-hugepages.mount                                                                      loaded active     mounted   Huge Pages File System
+  dev-mqueue.mount                                                                         loaded active     mounted   POSIX Message Queue File System
+  proc-sys-fs-binfmt_misc.mount                                                            loaded active     mounted   Arbitrary Executable File Formats File System
+  run-credentials-systemd\x2dsysusers.service.mount                                        loaded active     mounted   /run/credentials/systemd-sysusers.service
+  run-snapd-ns-snap\x2dstore.mnt.mount                                                     loaded active     mounted   /run/snapd/ns/snap-store.mnt
+  run-snapd-ns-snapd\x2ddesktop\x2dintegration.mnt.mount                                   loaded active     mounted   /run/snapd/ns/snapd-desktop-integration.mnt
+  run-snapd-ns.mount                                                                       loaded active     mounted   /run/snapd/ns
+  run-user-1000-doc.mount                                                                  loaded active     mounted   /run/user/1000/doc
+  run-user-1000-gvfs.mount                                                                 loaded active     mounted   /run/user/1000/gvfs
+  run-user-1000.mount                                                                      loaded active     mounted   /run/user/1000
+  snap-bare-5.mount                                                                        loaded active     mounted   Mount unit for bare, revision 5
+  snap-core22-1122.mount                                                                   loaded active     mounted   Mount unit for core22, revision 1122
+  snap-firefox-3836.mount                                                                  loaded active     mounted   Mount unit for firefox, revision 3836
+  snap-gnome\x2d42\x2d2204-141.mount                                                       loaded active     mounted   Mount unit for gnome-42-2204, revision 141
+  snap-gtk\x2dcommon\x2dthemes-1535.mount                                                  loaded active     mounted   Mount unit for gtk-common-themes, revision 1535
+  snap-snap\x2dstore-1113.mount                                                            loaded active     mounted   Mount unit for snap-store, revision 1113
+  snap-snap\x2dstore-959.mount                                                             loaded active     mounted   Mount unit for snap-store, revision 959
+  snap-snapd-20671.mount                                                                   loaded active     mounted   Mount unit for snapd, revision 20671
+  snap-snapd\x2ddesktop\x2dintegration-83.mount                                            loaded active     mounted   Mount unit for snapd-desktop-integration, revision 83
+  sys-fs-fuse-connections.mount                                                            loaded active     mounted   FUSE Control File System
+  sys-kernel-config.mount                                                                  loaded active     mounted   Kernel Configuration File System
+  sys-kernel-debug.mount                                                                   loaded active     mounted   Kernel Debug File System
+  sys-kernel-tracing.mount                                                                 loaded active     mounted   Kernel Trace File System
+[0m[0;4m [0m[0m[0;4m [0m[0m[0;4mvar-snap-firefox-common-host\x2dhunspell.mount                                          [0m[0m[0;4m [0m[0m[0;4mloaded[0m[0m[0;4m [0m[0m[0;4mactive    [0m[0m[0;4m [0m[0m[0;4mmounted  [0m[0m[0;4m [0m[0m[0;4mMount unit for firefox, revision 3836 via mount-control                      [0m
+  acpid.path                                                                               loaded active     running   ACPI Events Check
+  cups.path                                                                            
