@@ -125,6 +125,60 @@ Mac DEXT は device speed に応じて video packet size を変えている。Li
 
 既存 Linux 実装は framebuffer 全体を単純に RGB565 へ変換して bulk OUT しているように見えるが、T6 実機が本当にその形式を受けるかは未確認。Mac/Windows の実 traffic で確認する必要がある。
 
+## Windows motion capture: 2026-06-21
+
+Windows 公式 driver で、制御した motion pattern を横向き `1920x1080` で capture した。
+
+対象 pcap:
+
+- `captures/type7_motion_horizontal_bands.pcapng`
+- `captures/type7_motion_vertical_bands.pcapng`
+- `captures/type7_motion_large_rects.pcapng`
+- `captures/type7_motion_fullscreen_colors.pcapng`
+
+`tools/t6_reassemble_video.py --salvage-eoi` と `tools/t6_type7_timeline.py --jpeg-summary` で確認した結果:
+
+| Capture | type4 | type7 | type7 JPEG size | 備考 |
+| --- | ---: | ---: | --- | --- |
+| `fullscreen_colors` | 23 | 2 | `192x728` | 大きい色変化はほぼ type4 |
+| `horizontal_bands` | 37 | 4 | `192x1080`, `32x1080`, `32x344` | 帯更新でも type4 が多い |
+| `large_rects` | 28 | 11 | `192x1080` | type7 は同一 zone 内で連続 |
+| `vertical_bands` | 28 | 2 | `192x1080` | type4 が主体 |
+
+JPEG は type4/type7 ともに baseline で、SOF は `0xc0`。component sampling は全件で以下だった。
+
+```text
+id0:2x2:q0,id1:1x1:q1,id2:1x1:q1
+```
+
+つまり Windows 公式 driver も JPEG path では 4:2:0 を使っている。抽出 JPEG の comment には以下が入っていた。
+
+```text
+Intel(R) IPP JPEG encoder [7.1.37466] - Sep 25 2012;
+```
+
+このため、Windows 公式 driver は Intel IPP 系 JPEG encoder を使っている可能性が高い。
+
+address は主に次の 3 zone を回る。
+
+```text
+0x02500430 - 0x026fe430 span=0x1fe000
+0x029556f0 - 0x02b536f0 span=0x1fe000
+0x02daa9b0 - 0x02fa89b0 span=0x1fe000
+```
+
+`large_rects` の type7 では、`start_addr/end_addr = 0x02500430-0x026fe430` のまま `cmd_dest` だけが `0x23e0` ずつ進んでいた。`0x23e0 = align1024(payload_len) - 32` なので、`cmd_dest` は画面位置ではなく payload ring cursor と見るのが自然。
+
+`type4` は `1920x1080` JPEG を送る full-frame/large-update path に見える。今回の pcap では type4 JPEG の多くが capture 上 EOI 欠落だったが、trailing zero を落として EOI を付けると復元できた。`fullscreen_colors` では青の全画面 JPEG を復元できた。
+
+結論:
+
+- 大きい画面変化は type7 dirty tile だけではなく、type4 `1920x1080` JPEG が主体。
+- type7 は小さい補助 update または dirty strip に見える。
+- JPEG path は Windows 公式でも 4:2:0。Mac 実装で JPEG 4:4:4 に寄せるより、公式互換性を重視するなら 4:2:0 を前提にするべき。
+- type7 の `start_addr/end_addr` は直接の画面座標ではなく、3 zone / surface とその部分範囲を指している可能性が高い。
+- 正しい再現には type7 だけでなく type4 large-update path の実装/再生も必要。
+
 ## Existing capture: `captures/mctt6.pcapng`
 
 同梱 capture を `tshark` と `tools/t6_pcap_summary.py` で確認した。
