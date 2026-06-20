@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use image::RgbImage;
 use image::imageops::FilterType;
+use serde::Deserialize;
 use t6proto::usb::T6Device;
-use t6proto::{DEFAULT_MAX_BULK_PACKET_SIZE, Type7JpegTilePacket};
+use t6proto::{BulkDmaHeader, DEFAULT_MAX_BULK_PACKET_SIZE, Type7JpegTilePacket, fragments};
 use turbojpeg::Subsamp;
 
 #[derive(Clone, Debug)]
@@ -38,6 +40,8 @@ struct Options {
     scan_known_addresses: bool,
     scan_sleep_ms: u64,
     zero_based_component_ids: bool,
+    replay_groups_json: Option<PathBuf>,
+    replay_group: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +53,10 @@ enum InputKind {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
+    if let Some(path) = &options.replay_groups_json {
+        return replay_groups_json(&options, path);
+    }
+
     let mut jpeg = build_jpeg(&options)?;
     if options.zero_based_component_ids {
         patch_jpeg_component_ids_zero_based(&mut jpeg)?;
@@ -288,6 +296,222 @@ fn send_packet(
     Ok(())
 }
 
+fn replay_groups_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    if options.dry_run {
+        println!("Dry run; replay payloads will not be sent.");
+    }
+
+    let json = fs::read_to_string(path)?;
+    let export: ReplayExport = serde_json::from_str(&json)?;
+    if export.groups.is_empty() {
+        return Err("replay JSON contains no groups".into());
+    }
+
+    let group_index = options.replay_group.max(1);
+    let group = export
+        .groups
+        .get(group_index - 1)
+        .ok_or_else(|| format!("replay group {group_index} is not present"))?;
+    if group.tiles.is_empty() {
+        return Err(format!("replay group {group_index} contains no tiles").into());
+    }
+
+    println!(
+        "Replaying type7 group index={} tiles={} pcap={} session={} time={:.6}-{:.6}",
+        group.index,
+        group.tiles.len(),
+        group.pcap,
+        group.session,
+        group.time_start,
+        group.time_end
+    );
+
+    let device = if options.dry_run {
+        None
+    } else {
+        Some(T6Device::open_first().map_err(|error| format!("open device failed: {error}"))?)
+    };
+    if let Some(device) = &device {
+        if options.ready {
+            device
+                .send_software_ready(1)
+                .map_err(|error| format!("send software-ready failed: {error}"))?;
+            println!("Sent software ready.");
+        }
+        if options.power_on {
+            device
+                .set_monitor_power(1, true)
+                .map_err(|error| format!("send monitor power-on failed: {error}"))?;
+            println!("Sent monitor power on.");
+        }
+        if options.reset_jpeg_engine {
+            device
+                .reset_jpeg_engine(1)
+                .map_err(|error| format!("send JPEG engine reset failed: {error}"))?;
+            println!("Sent JPEG engine reset.");
+        }
+    }
+
+    for (tile_index, tile) in group.tiles.iter().enumerate() {
+        let payload = base64::engine::general_purpose::STANDARD.decode(&tile.payload_b64)?;
+        if payload.len() != tile.cmd_total_len as usize {
+            println!(
+                "warning: tile {}/{} payload_len={} cmd_total_len={}",
+                tile_index + 1,
+                group.tiles.len(),
+                payload.len(),
+                tile.cmd_total_len
+            );
+        }
+        println!(
+            "replay tile {}/{} seq=0x{:08x} cmd_dest=0x{:08x} payload_bytes={} size={}x{} canvas={}x{} start=0x{:08x} end=0x{:08x} jpeg={}x{} components={}",
+            tile_index + 1,
+            group.tiles.len(),
+            tile.sequence,
+            tile.cmd_dest,
+            payload.len(),
+            tile.width,
+            tile.height,
+            tile.canvas_width,
+            tile.canvas_height,
+            tile.start_addr,
+            tile.end_addr,
+            tile.jpeg_width.unwrap_or(0),
+            tile.jpeg_height.unwrap_or(0),
+            tile.jpeg_components.as_deref().unwrap_or("?"),
+        );
+        if options.dump_header {
+            let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE.min(payload.len());
+            println!("type7_header={}", hex_bytes(&payload[..header_len]));
+        }
+
+        if let Some(device) = &device {
+            send_raw_payload(device, options, tile.cmd_dest, tile.sequence, &payload)?;
+        }
+
+        if options.scan_sleep_ms > 0 && tile_index + 1 < group.tiles.len() {
+            thread::sleep(Duration::from_millis(options.scan_sleep_ms));
+        }
+    }
+
+    Ok(())
+}
+
+fn send_raw_payload(
+    device: &T6Device,
+    options: &Options,
+    payload_addr: u32,
+    sequence: u32,
+    payload: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let payload_len = payload.len() as u32;
+    let chunks = fragments(payload_len, options.max_packet_size)
+        .map(|fragment| {
+            let data =
+                &payload[fragment.offset as usize..(fragment.offset + fragment.size) as usize];
+            (
+                BulkDmaHeader::display(
+                    payload_len,
+                    payload_addr,
+                    fragment.size,
+                    fragment.offset,
+                    fragment.more,
+                ),
+                data,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (index, (header, data)) in chunks.iter().enumerate() {
+        if let Err(error) = device.write_display_bulk(&header.to_bytes()) {
+            if options.wait_interrupt_ms > 0 {
+                let _ = wait_for_interrupts(
+                    device,
+                    sequence,
+                    Duration::from_millis(options.wait_interrupt_ms),
+                    options.dump_interrupts,
+                );
+            }
+            return Err(format!(
+                "replay bulk header error at chunk {}/{} offset={} size={}: {error}",
+                index + 1,
+                chunks.len(),
+                header.packet_offset,
+                header.packet_size
+            )
+            .into());
+        }
+        if let Err(error) = device.write_display_bulk(data) {
+            if options.wait_interrupt_ms > 0 {
+                let _ = wait_for_interrupts(
+                    device,
+                    sequence,
+                    Duration::from_millis(options.wait_interrupt_ms),
+                    options.dump_interrupts,
+                );
+            }
+            return Err(format!(
+                "replay bulk data error at chunk {}/{} offset={} size={}: {error}",
+                index + 1,
+                chunks.len(),
+                header.packet_offset,
+                header.packet_size
+            )
+            .into());
+        }
+        println!(
+            "sent replay chunk {}/{} offset={} size={}",
+            index + 1,
+            chunks.len(),
+            header.packet_offset,
+            header.packet_size
+        );
+    }
+
+    if options.wait_interrupt_ms > 0 {
+        wait_for_interrupts(
+            device,
+            sequence,
+            Duration::from_millis(options.wait_interrupt_ms),
+            options.dump_interrupts,
+        )?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayExport {
+    groups: Vec<ReplayGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayGroup {
+    index: usize,
+    pcap: String,
+    session: u32,
+    time_start: f64,
+    time_end: f64,
+    tiles: Vec<ReplayTile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayTile {
+    sequence: u32,
+    cmd_dest: u32,
+    cmd_total_len: u32,
+    width: u16,
+    height: u16,
+    canvas_width: u16,
+    canvas_height: u16,
+    start_addr: u32,
+    end_addr: u32,
+    jpeg_width: Option<u16>,
+    jpeg_height: Option<u16>,
+    jpeg_components: Option<String>,
+    payload_b64: String,
+}
+
 fn next_ring_addr(payload_addr: u32, payload_len: usize) -> u32 {
     let aligned = ((payload_len as u32).saturating_add(0x3ff)) & !0x3ff;
     payload_addr.wrapping_add(aligned.saturating_sub(32))
@@ -390,6 +614,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut scan_known_addresses = false;
     let mut scan_sleep_ms = 100;
     let mut zero_based_component_ids = false;
+    let mut replay_groups_json = None;
+    let mut replay_group = 1;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -426,6 +652,13 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 scan_sleep_ms = next_value(&mut args, "--scan-sleep-ms")?.parse()?
             }
             "--zero-based-component-ids" => zero_based_component_ids = true,
+            "--replay-groups-json" => {
+                replay_groups_json = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--replay-groups-json",
+                )?))
+            }
+            "--replay-group" => replay_group = next_value(&mut args, "--replay-group")?.parse()?,
             "--ready" => ready = true,
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
@@ -438,12 +671,18 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
 
-    let (input_path, input_kind) = match (jpeg_path, image_path, solid_white) {
-        (Some(jpeg_path), None, false) => (jpeg_path, InputKind::Jpeg),
-        (None, Some(image_path), false) => (image_path, InputKind::Image),
-        (None, None, true) => (PathBuf::new(), InputKind::SolidWhite),
-        (None, None, false) => return Err("--jpeg, --image, or --solid-white is required".into()),
-        _ => return Err("use only one of --jpeg, --image, or --solid-white".into()),
+    let (input_path, input_kind) = if replay_groups_json.is_some() {
+        (PathBuf::new(), InputKind::Jpeg)
+    } else {
+        match (jpeg_path, image_path, solid_white) {
+            (Some(jpeg_path), None, false) => (jpeg_path, InputKind::Jpeg),
+            (None, Some(image_path), false) => (image_path, InputKind::Image),
+            (None, None, true) => (PathBuf::new(), InputKind::SolidWhite),
+            (None, None, false) => {
+                return Err("--jpeg, --image, or --solid-white is required".into());
+            }
+            _ => return Err("use only one of --jpeg, --image, or --solid-white".into()),
+        }
     };
 
     Ok(Options {
@@ -472,6 +711,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         scan_known_addresses,
         scan_sleep_ms,
         zero_based_component_ids,
+        replay_groups_json,
+        replay_group,
     })
 }
 
@@ -768,6 +1009,9 @@ Options:\n\
     --scan-sleep-ms N       Sleep between scanned address pairs, default 100\n\
     --zero-based-component-ids\n\
                             Rewrite generated/read JPEG SOF/SOS component ids to 0,1,2\n\
+    --replay-groups-json PATH\n\
+                            Replay a group exported by tools/t6_type7_timeline.py\n\
+    --replay-group N        1-based group index for --replay-groups-json, default 1\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\

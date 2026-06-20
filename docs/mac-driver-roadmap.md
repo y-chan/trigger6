@@ -566,3 +566,28 @@ cargo run --features usb --bin t6-send-type7 -- \
 - これは placement を自動解決するものではなく、有効 zone を分類するための実験。
 - デバイスが固まった場合は抜き差しで復旧する前提。
 - `--dry-run` を付けると、送信せず JPEG sampling と ring cursor 更新だけ確認できる。
+
+2026-06-21 追記:
+
+- `--subsamp 420` と `--zero-based-component-ids` でも、単発 synthetic tile の address scan では表示変化が見えなかった。
+- したがって、少なくとも単発生成 tile だけでは type7 表示条件を満たしていない可能性が高い。
+- 次は Windows capture の `payload_b64` を含む group export を、そのまま raw type7 payload として replay する。
+
+実行例:
+
+```sh
+python3 tools/t6_type7_timeline.py captures/<windows_capture>.pcapng \
+  --export-groups-json captures/type7_groups.json \
+  --limit-groups 20
+
+cargo run --features usb --bin t6-send-type7 -- \
+  --replay-groups-json captures/type7_groups.json \
+  --replay-group 1 \
+  --scan-sleep-ms 100 \
+  --wait-interrupt-ms 100
+```
+
+`--replay-groups-json` では、生成 JPEG ではなく export JSON 内の type7
+`payload_b64` をそのまま bulk payload として送る。`cmd_dest` も capture 値を使う。
+これで表示が出るなら、synthetic tile 側の header/JPEG/group 条件が不足している。
+これでも出ないなら、type7 の前段 state、surface 初期化、または Windows capture 前後の別 command が必要。
