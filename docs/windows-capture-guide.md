@@ -13,8 +13,10 @@ Mac 側では次が確認済み。
 - `start_addr/end_addr` を変えると表示の出方は変わる。
 - ただし `start_addr/end_addr` だけではまだ正しい表示位置を再現できていない。
 - `crop-x` を変えても表示位置は動かず、tile 内の内容だけが変わる。
+- 2026-06-21 の再解析では、`cmd_dest` は表示位置ではなく type7 JPEG payload ring の書き込み先と見るのが自然。連続 tile では概ね `next_cmd_dest = cmd_dest + align1024(payload_len) - 32` で進む。
+- 複数 tile group の後に独立した commit / flip packet は、既存解析範囲では見えていない。
 
-したがって Windows 側では、既知位置の小さい矩形を動かす capture、JPEG 種類を見る capture、大きい画面変化を見る capture を必ず分けて取る。大きい payload が混ざると解析しづらいので、通常の位置対応 capture に full-screen update や動画再生を混ぜない。
+したがって Windows 側では、既知位置の小さい矩形を動かす capture、JPEG 種類を見る capture、大きい画面変化を見る capture を必ず分けて取る。大きい payload が混ざると解析しづらいので、通常の位置対応 capture に full-screen update や動画再生を混ぜない。位置対応では主に `start_addr/end_addr` pair、tile group 内の pair 切り替わり、sequence ack を見る。
 
 ## 必要なもの
 
@@ -151,7 +153,13 @@ python3 tools/t6_pcap_summary.py captures/win_type7_rect_64x64_positions.pcapng 
 type7 timeline を見る。
 
 ```sh
-python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapng --limit-groups 80 --verbose --address-summary
+python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapng --limit-groups 80 --verbose --ack-summary --cmd-dest-summary --cmd-dest-payload-correlation --address-summary --address-transition-summary
+```
+
+JPEG 種類を見る capture では、sampling を必ず集計する。
+
+```sh
+python3 tools/t6_type7_timeline.py captures/win_type7_jpeg_sampling_patterns.pcapng --jpeg-summary --limit-groups 80
 ```
 
 大きい画面変化 capture は、まず video type の比率を見る。
@@ -166,9 +174,12 @@ python3 tools/t6_pcap_summary.py captures/win_type7_large_changes.pcapng | rg "v
 - `type7_rows` が出ているか。
 - `width/height` が `64x64` など意図した矩形に近いか。
 - 矩形位置を変えたタイミングで `start_addr/end_addr` がどう変わるか。
-- `cmd_dest` が単なる payload buffer か、位置や surface と連動するか。
+- `cmd_dest` が `align1024(payload_len) - 32` に従って進むか。
+- sequence が連続している tile で、`cmd_dest` delta と payload 長の対応が崩れる例があるか。
 - sequence と interrupt `event=0x04 value=...` が一致するか。
+- ack latency が数 ms 程度に収まるか。missing ack は capture window 外や interrupt window 超過の可能性もあるので、単独では失敗扱いにしない。
 - 1回の矩形移動が単独 tile か、複数 tile group か。
+- 複数 tile group 内で `start_addr/end_addr` pair が、左帯/中央帯/残り帯のように切り替わるか。
 - JPEG SOF が `0xc0` baseline か、`0xc2` progressive か。
 - JPEG sampling が `id1:2x2,id2:1x1,id3:1x1` など 4:2:0 か、`1x1` の 4:4:4 か。
 - 大きい画面変化で `type=0x7` が継続するか、`type=0x3/type=0x4` full-frame JPEG に切り替わるか。
@@ -208,8 +219,9 @@ python3 tools/t6_pcap_summary.py captures/win_type7_large_changes.pcapng | rg "v
 
 - `start_addr/end_addr` は tile の画面座標を直接表しているのか。
 - 画面 x/y の変化に対応して変わる field はどれか。
-- `cmd_dest` は payload ring buffer だけか、表示位置にも関係するか。
+- `cmd_dest` は payload ring buffer として説明しきれるか。
 - 複数 tile group の中で、tile の並び順と画面上の位置に規則があるか。
+- capture 由来の group replay に必要な最小 field は、`cmd_dest` ring cursor と `start_addr/end_addr` pair と sequence だけで足りるか。
 - Windows driver の type7 JPEG は 420/422/444 のどれか。
 - Mac 側で赤/緑だけに見えている原因は JPEG sampling か、decoder target surface format か、placement/stride か。
 - 大きい画面変化では dirty tile path を使い続けるのか、full-frame path を使うのか。
