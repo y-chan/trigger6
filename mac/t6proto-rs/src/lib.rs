@@ -302,6 +302,11 @@ pub struct VideoFlipHeader {
 }
 
 impl VideoFlipHeader {
+    pub fn with_fence_id(mut self, fence_id: u32) -> Self {
+        self.fence_id = fence_id;
+        self
+    }
+
     pub fn jpeg(
         display_index: u8,
         payload_size: u32,
@@ -580,6 +585,30 @@ impl JpegFramePacket {
         target_format: u32,
         flags: u8,
     ) -> Self {
+        Self::new_with_target_format_and_fence(
+            display_index,
+            jpeg,
+            width,
+            height,
+            cmd_addr,
+            fb_addr,
+            target_format,
+            flags,
+            0,
+        )
+    }
+
+    pub fn new_with_target_format_and_fence(
+        display_index: u8,
+        jpeg: &[u8],
+        width: u16,
+        height: u16,
+        cmd_addr: u32,
+        fb_addr: u32,
+        target_format: u32,
+        flags: u8,
+        fence_id: u32,
+    ) -> Self {
         let payload_size = (jpeg.len() + JPEG_PADDING_SIZE) as u32;
         let header = VideoFlipHeader::jpeg_with_target_format(
             display_index,
@@ -589,7 +618,8 @@ impl JpegFramePacket {
             fb_addr,
             target_format,
             flags,
-        );
+        )
+        .with_fence_id(fence_id);
         let mut payload =
             Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + jpeg.len() + JPEG_PADDING_SIZE);
 
@@ -621,6 +651,30 @@ impl JpegFramePacket {
 }
 
 impl RawFramePacket {
+    pub fn rgb24_with_fence(
+        display_index: u8,
+        rgb: &[u8],
+        width: u16,
+        height: u16,
+        fb_addr: u32,
+        flags: u8,
+        fence_id: u32,
+    ) -> Self {
+        let payload_size = rgb.len() as u32;
+        let header = VideoFlipHeader::rgb24(display_index, payload_size, width, fb_addr, flags)
+            .with_fence_id(fence_id);
+        let mut payload = Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + rgb.len());
+
+        debug_assert_eq!(rgb.len(), usize::from(width) * usize::from(height) * 3);
+        payload.extend_from_slice(&header.to_bytes());
+        payload.extend_from_slice(rgb);
+
+        Self {
+            payload_address: fb_addr,
+            payload,
+        }
+    }
+
     pub fn rgb24(
         display_index: u8,
         rgb: &[u8],
@@ -629,13 +683,28 @@ impl RawFramePacket {
         fb_addr: u32,
         flags: u8,
     ) -> Self {
-        let payload_size = rgb.len() as u32;
-        let header = VideoFlipHeader::rgb24(display_index, payload_size, width, fb_addr, flags);
-        let mut payload = Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + rgb.len());
+        Self::rgb24_with_fence(display_index, rgb, width, height, fb_addr, flags, 0)
+    }
 
-        debug_assert_eq!(rgb.len(), usize::from(width) * usize::from(height) * 3);
+    pub fn nv12_with_fence(
+        display_index: u8,
+        nv12: &[u8],
+        width: u16,
+        height: u16,
+        fb_addr: u32,
+        flags: u8,
+        fence_id: u32,
+    ) -> Self {
+        let payload_size = (nv12.len() + JPEG_PADDING_SIZE) as u32;
+        let header =
+            VideoFlipHeader::nv12(display_index, payload_size, width, height, fb_addr, flags)
+                .with_fence_id(fence_id);
+        let mut payload =
+            Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + nv12.len() + JPEG_PADDING_SIZE);
+
         payload.extend_from_slice(&header.to_bytes());
-        payload.extend_from_slice(rgb);
+        payload.extend_from_slice(nv12);
+        payload.resize(payload.len() + JPEG_PADDING_SIZE, 0);
 
         Self {
             payload_address: fb_addr,
@@ -651,14 +720,27 @@ impl RawFramePacket {
         fb_addr: u32,
         flags: u8,
     ) -> Self {
-        let payload_size = (nv12.len() + JPEG_PADDING_SIZE) as u32;
+        Self::nv12_with_fence(display_index, nv12, width, height, fb_addr, flags, 0)
+    }
+
+    pub fn yv12_with_fence(
+        display_index: u8,
+        yv12: &[u8],
+        width: u16,
+        height: u16,
+        fb_addr: u32,
+        flags: u8,
+        fence_id: u32,
+    ) -> Self {
+        let payload_size = (yv12.len() + JPEG_PADDING_SIZE) as u32;
         let header =
-            VideoFlipHeader::nv12(display_index, payload_size, width, height, fb_addr, flags);
+            VideoFlipHeader::yv12(display_index, payload_size, width, height, fb_addr, flags)
+                .with_fence_id(fence_id);
         let mut payload =
-            Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + nv12.len() + JPEG_PADDING_SIZE);
+            Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + yv12.len() + JPEG_PADDING_SIZE);
 
         payload.extend_from_slice(&header.to_bytes());
-        payload.extend_from_slice(nv12);
+        payload.extend_from_slice(yv12);
         payload.resize(payload.len() + JPEG_PADDING_SIZE, 0);
 
         Self {
@@ -675,15 +757,26 @@ impl RawFramePacket {
         fb_addr: u32,
         flags: u8,
     ) -> Self {
-        let payload_size = (yv12.len() + JPEG_PADDING_SIZE) as u32;
-        let header =
-            VideoFlipHeader::yv12(display_index, payload_size, width, height, fb_addr, flags);
-        let mut payload =
-            Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + yv12.len() + JPEG_PADDING_SIZE);
+        Self::yv12_with_fence(display_index, yv12, width, height, fb_addr, flags, 0)
+    }
 
+    pub fn yuv444_with_fence(
+        display_index: u8,
+        yuv444: &[u8],
+        width: u16,
+        height: u16,
+        fb_addr: u32,
+        flags: u8,
+        fence_id: u32,
+    ) -> Self {
+        let payload_size = yuv444.len() as u32;
+        let header = VideoFlipHeader::yuv444(display_index, payload_size, width, fb_addr, flags)
+            .with_fence_id(fence_id);
+        let mut payload = Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + yuv444.len());
+
+        debug_assert_eq!(yuv444.len(), usize::from(width) * usize::from(height) * 3);
         payload.extend_from_slice(&header.to_bytes());
-        payload.extend_from_slice(yv12);
-        payload.resize(payload.len() + JPEG_PADDING_SIZE, 0);
+        payload.extend_from_slice(yuv444);
 
         Self {
             payload_address: fb_addr,
@@ -699,18 +792,7 @@ impl RawFramePacket {
         fb_addr: u32,
         flags: u8,
     ) -> Self {
-        let payload_size = yuv444.len() as u32;
-        let header = VideoFlipHeader::yuv444(display_index, payload_size, width, fb_addr, flags);
-        let mut payload = Vec::with_capacity(VIDEO_FLIP_HEADER_SIZE + yuv444.len());
-
-        debug_assert_eq!(yuv444.len(), usize::from(width) * usize::from(height) * 3);
-        payload.extend_from_slice(&header.to_bytes());
-        payload.extend_from_slice(yuv444);
-
-        Self {
-            payload_address: fb_addr,
-            payload,
-        }
+        Self::yuv444_with_fence(display_index, yuv444, width, height, fb_addr, flags, 0)
     }
 
     pub fn bulk_chunks(&self, max_packet_size: u32) -> Vec<BulkTransferChunk<'_>> {

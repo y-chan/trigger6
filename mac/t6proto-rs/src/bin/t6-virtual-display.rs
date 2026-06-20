@@ -232,6 +232,7 @@ struct SenderState {
     dirty_bgra_scratch: Vec<u8>,
     current_quality: i32,
     remaining_interrupt_dumps: u32,
+    next_fence_id: u32,
     frame_interval: Duration,
     next_send_at: Instant,
     started_at: Instant,
@@ -781,6 +782,7 @@ fn build_sender_state(
         dirty_bgra_scratch: Vec::new(),
         current_quality,
         remaining_interrupt_dumps,
+        next_fence_id: 1,
     })
 }
 
@@ -1315,7 +1317,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
         }
     }
 
-    let (payload_bytes, chunks, cmd_addr, fb_addr, reset_jpeg) = match options.transport {
+    let (payload_bytes, chunks, cmd_addr, fb_addr, reset_jpeg, fence_id) = match options.transport {
         Transport::Jpeg => {
             ensure_bgra_capture(frame)?;
             if options.dirty_mode == DirtyMode::TileSend {
@@ -1356,13 +1358,15 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 )?
             };
             let addresses = state.scheduler.next_jpeg_frame(nv12.len());
-            let packet = RawFramePacket::nv12(
+            let fence_id = next_fence_id(state);
+            let packet = RawFramePacket::nv12_with_fence(
                 options.display_index,
                 &nv12,
                 output_width,
                 output_height,
                 addresses.fb_addr,
                 0,
+                fence_id,
             );
             let chunks = packet.bulk_chunks(options.max_packet_size).len();
             if let Some(device) = &state.device {
@@ -1380,6 +1384,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 addresses.cmd_addr,
                 addresses.fb_addr,
                 false,
+                fence_id,
             )
         }
         Transport::Rgb24 => {
@@ -1393,13 +1398,15 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 &mut state.rgb_scratch,
             );
             let addresses = state.scheduler.next_jpeg_frame(state.rgb_scratch.len());
-            let packet = RawFramePacket::rgb24(
+            let fence_id = next_fence_id(state);
+            let packet = RawFramePacket::rgb24_with_fence(
                 options.display_index,
                 &state.rgb_scratch,
                 output_width,
                 output_height,
                 addresses.fb_addr,
                 0,
+                fence_id,
             );
             let chunks = packet.bulk_chunks(options.max_packet_size).len();
             if let Some(device) = &state.device {
@@ -1417,6 +1424,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 addresses.cmd_addr,
                 addresses.fb_addr,
                 false,
+                fence_id,
             )
         }
         Transport::Yv12 => {
@@ -1432,13 +1440,15 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 options.yuv_range,
             )?;
             let addresses = state.scheduler.next_jpeg_frame(yv12.len());
-            let packet = RawFramePacket::yv12(
+            let fence_id = next_fence_id(state);
+            let packet = RawFramePacket::yv12_with_fence(
                 options.display_index,
                 &yv12,
                 output_width,
                 output_height,
                 addresses.fb_addr,
                 0,
+                fence_id,
             );
             let chunks = packet.bulk_chunks(options.max_packet_size).len();
             if let Some(device) = &state.device {
@@ -1456,6 +1466,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 addresses.cmd_addr,
                 addresses.fb_addr,
                 false,
+                fence_id,
             )
         }
         Transport::Yuv444 => {
@@ -1470,13 +1481,15 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 options.yuv_range,
             );
             let addresses = state.scheduler.next_jpeg_frame(yuv444.len());
-            let packet = RawFramePacket::yuv444(
+            let fence_id = next_fence_id(state);
+            let packet = RawFramePacket::yuv444_with_fence(
                 options.display_index,
                 &yuv444,
                 output_width,
                 output_height,
                 addresses.fb_addr,
                 0,
+                fence_id,
             );
             let chunks = packet.bulk_chunks(options.max_packet_size).len();
             if let Some(device) = &state.device {
@@ -1494,6 +1507,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 addresses.cmd_addr,
                 addresses.fb_addr,
                 false,
+                fence_id,
             )
         }
     };
@@ -1534,7 +1548,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             0.0
         };
         println!(
-            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}{}",
+            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} fence=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}{}",
             state.sent_frames,
             sent_fps,
             state.dropped_frames,
@@ -1545,6 +1559,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             payload_bytes,
             cmd_addr,
             fb_addr,
+            fence_id,
             reset_jpeg,
             chunks,
             frame.dirty.rect_count,
@@ -1586,7 +1601,7 @@ fn send_full_jpeg_frame(
     output_height: u16,
     frame_started: Instant,
     profile: &mut ProfileSample,
-) -> Result<(usize, usize, u32, u32, bool), Box<dyn Error>> {
+) -> Result<(usize, usize, u32, u32, bool, u32), Box<dyn Error>> {
     let options = state.options.clone();
     let convert_started = Instant::now();
     let (jpeg_pixels, jpeg_pitch) = if options.rotate == Rotation::Deg0 {
@@ -1608,25 +1623,28 @@ fn send_full_jpeg_frame(
     let frame_interval = state.frame_interval;
     if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
         drop_late_frame(state, *profile, frame_started);
-        return Ok((0, 0, 0, 0, false));
+        return Ok((0, 0, 0, 0, false, 0));
     }
+    let fence_id = next_fence_id(state);
     let encode_started = Instant::now();
-    let compressor = state
-        .jpeg_compressor
-        .as_mut()
-        .ok_or("JPEG compressor is not initialized")?;
-    let jpeg = compressor.compress_bgra_ptr(
-        jpeg_pixels,
-        usize::from(output_width),
-        jpeg_pitch,
-        usize::from(output_height),
-        state.current_quality,
-    )?;
+    let jpeg = {
+        let compressor = state
+            .jpeg_compressor
+            .as_mut()
+            .ok_or("JPEG compressor is not initialized")?;
+        compressor.compress_bgra_ptr(
+            jpeg_pixels,
+            usize::from(output_width),
+            jpeg_pitch,
+            usize::from(output_height),
+            state.current_quality,
+        )?
+    };
     let jpeg_len = jpeg.len();
     profile.encode = encode_started.elapsed();
     if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
         drop_late_frame(state, *profile, frame_started);
-        return Ok((0, 0, 0, 0, false));
+        return Ok((0, 0, 0, 0, false, 0));
     }
     let packet_started = Instant::now();
     let addresses = state.scheduler.next_jpeg_frame(jpeg_len);
@@ -1636,7 +1654,7 @@ fn send_full_jpeg_frame(
     } else {
         0
     };
-    let packet = JpegFramePacket::new_with_target_format(
+    let packet = JpegFramePacket::new_with_target_format_and_fence(
         options.display_index,
         jpeg,
         output_width,
@@ -1645,6 +1663,7 @@ fn send_full_jpeg_frame(
         addresses.fb_addr,
         options.jpeg_target.video_color(),
         flags,
+        fence_id,
     );
     let chunks = packet.bulk_chunks(options.max_packet_size).len();
     profile.packet = packet_started.elapsed();
@@ -1664,6 +1683,7 @@ fn send_full_jpeg_frame(
         addresses.cmd_addr,
         addresses.fb_addr,
         addresses.reset_jpeg,
+        fence_id,
     ))
 }
 
@@ -1851,6 +1871,12 @@ fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
         ),
         None => String::new(),
     }
+}
+
+fn next_fence_id(state: &mut SenderState) -> u32 {
+    let fence_id = state.next_fence_id;
+    state.next_fence_id = state.next_fence_id.wrapping_add(1).max(1);
+    fence_id
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
