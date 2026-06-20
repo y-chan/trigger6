@@ -42,6 +42,8 @@ struct Options {
     zero_based_component_ids: bool,
     replay_groups_json: Option<PathBuf>,
     replay_group: usize,
+    replay_manifest_json: Option<PathBuf>,
+    replay_record: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +57,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     if let Some(path) = &options.replay_groups_json {
         return replay_groups_json(&options, path);
+    }
+    if let Some(path) = &options.replay_manifest_json {
+        return replay_manifest_json(&options, path);
     }
 
     let mut jpeg = build_jpeg(&options)?;
@@ -397,6 +402,111 @@ fn replay_groups_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn E
     Ok(())
 }
 
+fn replay_manifest_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    if options.dry_run {
+        println!("Dry run; replay payloads will not be sent.");
+    }
+
+    let json = fs::read_to_string(path)?;
+    let manifest: ReplayManifest = serde_json::from_str(&json)?;
+    if manifest.records.is_empty() {
+        return Err("replay manifest contains no records".into());
+    }
+
+    let base_dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let selected = manifest
+        .records
+        .iter()
+        .filter(|record| {
+            options
+                .replay_record
+                .is_none_or(|index| record.index == index)
+        })
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(format!("replay record {:?} is not present", options.replay_record).into());
+    }
+
+    println!(
+        "Replaying manifest records={} selected={} pcap={}",
+        manifest.count,
+        selected.len(),
+        manifest.pcap
+    );
+
+    let device = if options.dry_run {
+        None
+    } else {
+        Some(T6Device::open_first().map_err(|error| format!("open device failed: {error}"))?)
+    };
+    if let Some(device) = &device {
+        if options.ready {
+            device
+                .send_software_ready(1)
+                .map_err(|error| format!("send software-ready failed: {error}"))?;
+            println!("Sent software ready.");
+        }
+        if options.power_on {
+            device
+                .set_monitor_power(1, true)
+                .map_err(|error| format!("send monitor power-on failed: {error}"))?;
+            println!("Sent monitor power on.");
+        }
+        if options.reset_jpeg_engine {
+            device
+                .reset_jpeg_engine(1)
+                .map_err(|error| format!("send JPEG engine reset failed: {error}"))?;
+            println!("Sent JPEG engine reset.");
+        }
+    }
+
+    for (selected_index, record) in selected.iter().enumerate() {
+        let payload_path = base_dir.join(&record.files.payload);
+        let payload = fs::read(&payload_path)?;
+        let cmd_dest = record.command.dest;
+        let sequence = record.video.sequence;
+        if payload.len() != record.command.total_len as usize {
+            println!(
+                "warning: record {} payload_len={} command.total_len={}",
+                record.index,
+                payload.len(),
+                record.command.total_len
+            );
+        }
+        println!(
+            "replay record {}/{} index={} type={} seq=0x{:08x} cmd_dest=0x{:08x} payload_bytes={} size={}x{} jpeg={}x{} start=0x{:08x} end=0x{:08x} components={}",
+            selected_index + 1,
+            selected.len(),
+            record.index,
+            record.video.video_type,
+            sequence,
+            cmd_dest,
+            payload.len(),
+            record.video.width_field,
+            record.video.height_field,
+            record.video.jpeg_width.unwrap_or(0),
+            record.video.jpeg_height.unwrap_or(0),
+            record.video.start_addr,
+            record.video.end_addr,
+            record.video.jpeg_components.as_deref().unwrap_or("?"),
+        );
+        if options.dump_header {
+            let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE.min(payload.len());
+            println!("payload_header={}", hex_bytes(&payload[..header_len]));
+        }
+
+        if let Some(device) = &device {
+            send_raw_payload(device, options, cmd_dest, sequence, &payload)?;
+        }
+
+        if options.scan_sleep_ms > 0 && selected_index + 1 < selected.len() {
+            thread::sleep(Duration::from_millis(options.scan_sleep_ms));
+        }
+    }
+
+    Ok(())
+}
+
 fn send_raw_payload(
     device: &T6Device,
     options: &Options,
@@ -512,6 +622,46 @@ struct ReplayTile {
     payload_b64: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayManifest {
+    pcap: String,
+    count: usize,
+    records: Vec<ReplayRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayRecord {
+    index: usize,
+    command: ReplayCommand,
+    video: ReplayVideo,
+    files: ReplayFiles,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayCommand {
+    total_len: u32,
+    dest: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayVideo {
+    #[serde(rename = "type")]
+    video_type: u32,
+    sequence: u32,
+    width_field: u16,
+    height_field: u16,
+    start_addr: u32,
+    end_addr: u32,
+    jpeg_width: Option<u16>,
+    jpeg_height: Option<u16>,
+    jpeg_components: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplayFiles {
+    payload: String,
+}
+
 fn next_ring_addr(payload_addr: u32, payload_len: usize) -> u32 {
     let aligned = ((payload_len as u32).saturating_add(0x3ff)) & !0x3ff;
     payload_addr.wrapping_add(aligned.saturating_sub(32))
@@ -616,6 +766,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut zero_based_component_ids = false;
     let mut replay_groups_json = None;
     let mut replay_group = 1;
+    let mut replay_manifest_json = None;
+    let mut replay_record = None;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -659,6 +811,15 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 )?))
             }
             "--replay-group" => replay_group = next_value(&mut args, "--replay-group")?.parse()?,
+            "--replay-manifest-json" => {
+                replay_manifest_json = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--replay-manifest-json",
+                )?))
+            }
+            "--replay-record" => {
+                replay_record = Some(next_value(&mut args, "--replay-record")?.parse()?)
+            }
             "--ready" => ready = true,
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
@@ -671,7 +832,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
 
-    let (input_path, input_kind) = if replay_groups_json.is_some() {
+    let (input_path, input_kind) = if replay_groups_json.is_some() || replay_manifest_json.is_some()
+    {
         (PathBuf::new(), InputKind::Jpeg)
     } else {
         match (jpeg_path, image_path, solid_white) {
@@ -713,6 +875,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         zero_based_component_ids,
         replay_groups_json,
         replay_group,
+        replay_manifest_json,
+        replay_record,
     })
 }
 
@@ -1012,6 +1176,9 @@ Options:\n\
     --replay-groups-json PATH\n\
                             Replay a group exported by tools/t6_type7_timeline.py\n\
     --replay-group N        1-based group index for --replay-groups-json, default 1\n\
+    --replay-manifest-json PATH\n\
+                            Replay records from captures/replay_jpeg manifest JSON\n\
+    --replay-record N       Optional manifest record index to replay\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\
