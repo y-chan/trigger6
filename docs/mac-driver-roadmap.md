@@ -130,6 +130,8 @@
   - `start=0x30`
   - `end=0x1fe030`
   - `payload_addr=0x02d00000`
+- `t6-send-type7 --image` は、crop 指定なしだと画像全体を tile サイズへリサイズする。細長い tile では画像が潰れて見えるため、表示位置確認には `--crop-x/--crop-y` で元画像から tile サイズを切り出す。
+- 色ズレ確認用に `--subsamp 420|422|444` と `--quality` を切り替えられる。まずは Windows capture に近い `--subsamp 420` と、Mac full-frame で綺麗だった `--subsamp 444` を比較する。
 
 ### 4. full-frame path の安定化
 

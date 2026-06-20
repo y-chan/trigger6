@@ -21,6 +21,10 @@ struct Options {
     canvas_height: u16,
     start_addr: u32,
     end_addr: u32,
+    crop_x: Option<u32>,
+    crop_y: Option<u32>,
+    quality: i32,
+    subsamp: Subsamp,
     ready: bool,
     power_on: bool,
     reset_jpeg_engine: bool,
@@ -40,7 +44,15 @@ enum InputKind {
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
     let jpeg = if options.input_kind == InputKind::Image {
-        encode_image_to_jpeg_444(&options.input_path, options.width, options.height)?
+        encode_image_to_jpeg(
+            &options.input_path,
+            options.width,
+            options.height,
+            options.crop_x,
+            options.crop_y,
+            options.quality,
+            options.subsamp,
+        )?
     } else {
         fs::read(&options.input_path)?
     };
@@ -226,6 +238,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut canvas_height = 1920;
     let mut start_addr = 0x30;
     let mut end_addr = 0x1fe030;
+    let mut crop_x = None;
+    let mut crop_y = None;
+    let mut quality = 90;
+    let mut subsamp = Subsamp::None;
     let mut ready = false;
     let mut power_on = false;
     let mut reset_jpeg_engine = false;
@@ -252,6 +268,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             }
             "--start-addr" => start_addr = parse_u32(&next_value(&mut args, "--start-addr")?)?,
             "--end-addr" => end_addr = parse_u32(&next_value(&mut args, "--end-addr")?)?,
+            "--crop-x" => crop_x = Some(next_value(&mut args, "--crop-x")?.parse()?),
+            "--crop-y" => crop_y = Some(next_value(&mut args, "--crop-y")?.parse()?),
+            "--quality" => quality = next_value(&mut args, "--quality")?.parse()?,
+            "--subsamp" => subsamp = parse_subsampling(&next_value(&mut args, "--subsamp")?)?,
             "--max-packet" => max_packet_size = parse_u32(&next_value(&mut args, "--max-packet")?)?,
             "--wait-interrupt-ms" => {
                 wait_interrupt_ms = next_value(&mut args, "--wait-interrupt-ms")?.parse()?
@@ -290,6 +310,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         canvas_height,
         start_addr,
         end_addr,
+        crop_x,
+        crop_y,
+        quality,
+        subsamp,
         ready,
         power_on,
         reset_jpeg_engine,
@@ -301,15 +325,26 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     })
 }
 
-fn encode_image_to_jpeg_444(
+fn encode_image_to_jpeg(
     image_path: &PathBuf,
     width: u16,
     height: u16,
+    crop_x: Option<u32>,
+    crop_y: Option<u32>,
+    quality: i32,
+    subsamp: Subsamp,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let rgb = image::open(image_path)?
-        .resize_exact(u32::from(width), u32::from(height), FilterType::Lanczos3)
-        .to_rgb8();
-    let jpeg = turbojpeg::compress_image(&rgb, 90, Subsamp::None)?;
+    let image = image::open(image_path)?;
+    let rgb = match (crop_x, crop_y) {
+        (Some(x), Some(y)) => image
+            .crop_imm(x, y, u32::from(width), u32::from(height))
+            .to_rgb8(),
+        (None, None) => image
+            .resize_exact(u32::from(width), u32::from(height), FilterType::Lanczos3)
+            .to_rgb8(),
+        _ => return Err("--crop-x and --crop-y must be specified together".into()),
+    };
+    let jpeg = turbojpeg::compress_image(&rgb, quality, subsamp)?;
     Ok(jpeg.to_vec())
 }
 
@@ -332,6 +367,15 @@ fn parse_u32(value: &str) -> Result<u32, Box<dyn Error>> {
             value.parse()?
         },
     )
+}
+
+fn parse_subsampling(value: &str) -> Result<Subsamp, Box<dyn Error>> {
+    match value {
+        "420" => Ok(Subsamp::Sub2x2),
+        "422" => Ok(Subsamp::Sub2x1),
+        "444" => Ok(Subsamp::None),
+        _ => Err("--subsamp must be one of 420, 422, 444".into()),
+    }
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -358,6 +402,10 @@ Options:\n\
     --canvas-height N       Type7 canvas height, default 1920\n\
     --start-addr N          Type7 start address, default 0x30\n\
     --end-addr N            Type7 end address, default 0x1fe030\n\
+    --crop-x N              Crop source image at x instead of resizing whole image\n\
+    --crop-y N              Crop source image at y instead of resizing whole image\n\
+    --quality N             JPEG quality for --image, default 90\n\
+    --subsamp 420|422|444   JPEG subsampling for --image, default 444\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
     --wait-interrupt-ms N   Read interrupts after send for up to N ms\n\
     --dump-interrupts N     Print first N raw interrupt packets\n\
