@@ -735,6 +735,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             .reset_jpeg_engine(u16::from(options.display_index))?;
         println!("Sent JPEG engine reset.");
     }
+    if options.wait_interrupt_ms > 0 {
+        let drained = drain_display_interrupts(
+            device
+                .as_ref()
+                .ok_or("--wait-interrupt-ms cannot be used with --dry-run")?,
+            Duration::from_millis(options.wait_interrupt_ms.max(50)),
+        )?;
+        if drained > 0 {
+            println!("Drained {drained} pending display interrupts.");
+        }
+    }
 
     if options.async_send {
         return run_async(options, device, ram_size_mb);
@@ -1868,6 +1879,26 @@ fn wait_for_display_interrupts(
     }
 
     Ok(summary)
+}
+
+fn drain_display_interrupts(device: &T6Device, duration: Duration) -> Result<u32, Box<dyn Error>> {
+    let deadline = Instant::now() + duration;
+    let mut drained = 0u32;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let timeout = (deadline - now).min(Duration::from_millis(10));
+        match device.read_interrupt_packet_timeout(timeout) {
+            Ok(_) => drained = drained.saturating_add(1),
+            Err(rusb::Error::Timeout) => break,
+            Err(error) => return Err(format!("interrupt drain error: {error}").into()),
+        }
+    }
+
+    Ok(drained)
 }
 
 fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
