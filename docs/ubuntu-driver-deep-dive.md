@@ -51,6 +51,8 @@ JPEG は 4:2:0 固定で生成されている。
 tjCompress2(..., TJSAMP_420, 95, TJFLAG_FASTDCT)
 ```
 
+この公式 Ubuntu 実装内には、独自 DQT/DHT や MCT 固有の JPEG table を直接差し込む処理は見当たらない。量子化テーブルや Huffman table は libjpeg-turbo / TurboJPEG が quality 95 と `TJSAMP_420` から通常生成していると見るのが自然。
+
 そのため、macOS 版で `quality=100` にしても信号機ボタンの色滲みが残る理由は説明できる。T6 が JPEG 4:2:2 / 4:4:4 を受けないなら、JPEG 経路での根本改善は難しい。
 
 ## YV12 / NV12 raw 経路

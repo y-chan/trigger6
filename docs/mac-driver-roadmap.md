@@ -319,3 +319,197 @@ single-output が安定するまで後回し。
 3. 複数tileが1つの画面更新を構成している箇所を探し、最後に commit / flip 相当の packet があるか確認する。
 4. `Type7JpegTilePacket` builderは残すが、Mac実機での送信は再度条件を絞るまで封印する。
 5. 実機が固まった場合は `--reset-jpeg-engine`、それでも駄目ならUSB抜き差しで復旧する。
+
+## 2026-06-21 type 7 再解析メモ
+
+`tools/t6_type7_timeline.py` に `--ack-summary` と `--cmd-dest-summary` を追加した。
+
+`captures/2026-06-19_jua365_win_05_partial_update.pcapng`:
+
+- type7 rows: 95
+- groups: 87
+- interrupt rows: 649
+- ack match: 82 / 95
+- ack latency: min 0.170ms, p50 1.657ms, p90 4.758ms, max 7.566ms
+- negative ack dt: 0
+- duplicate sequence matches: 0
+- `cmd_dest` range: `0x03244be0` - `0x039d27a0`
+- `cmd_dest` wraps: 12
+- common `cmd_dest` delta: `0x33e0` が最多
+
+`captures/2026-06-19_jua365_win_02_hdmi1_hotplug.pcapng`:
+
+- type7 rows: 108
+- groups: 94
+- interrupt rows: 288
+- ack match: 80 / 108
+- ack latency: min 0.234ms, p50 3.350ms, p90 7.819ms, max 7.941ms
+- negative ack dt: 0
+- duplicate sequence matches: 0
+- `cmd_dest` range: `0x03200000` - `0x039ea060`
+- `cmd_dest` wraps: 3
+- common `cmd_dest` delta: `0xb3e0` が最多
+
+観測:
+
+- type7 header の `sequence` は interrupt packet の `value` と一致する。interrupt は `flags=0x04`, `event=0x04`。
+- 単発 tile でも複数 tile group でも、各 tile sequence ごとに ack が返る例がある。
+- 複数 tile group の後に独立した commit / flip packet は、少なくともこの解析範囲では見えていない。
+- missing ack は capture window 外、interrupt window 8ms 超過、または frame skip / capture truncation の可能性がある。即座に「ack が存在しない」とは扱わない。
+- `cmd_dest` は command/payload ring 上の書き込み先と見るのが自然。差分は payload size を 0x400 境界に丸めた値に近い。
+- `start_addr/end_addr` は画面座標ではなく、decoder target / surface / VRAM zone の state を表す可能性が高いまま。
+
+次の解析:
+
+- `cmd_dest_delta` と `payload_len` / `data_len` の対応を CSV 出力し、`align1024(payload_len)` と一致するか確認する。
+- `start_addr/end_addr` pair の切り替わりと `cmd_dest` wrap、JPEG reset、fence ack の関係を見る。
+- Mac 側の再実験は単発 tile ではなく、Windows capture の group replay に寄せる。ただし現時点では実送信封印を維持する。
+
+### `cmd_dest` と payload 長の対応
+
+`tools/t6_type7_timeline.py --cmd-dest-payload-correlation` を追加し、
+`cmd_dest` の次値との差分を前 tile の payload 長と比較した。
+
+結果:
+
+- `05_partial_update`
+  - non-wrap pair: 82
+  - wrap: 12
+  - `delta == align1024(prev_payload_len) - 32`: 35
+  - sequence が連続する pair: 35
+  - 連続 sequence では `align1024(prev_payload_len) - 32` が 35 / 35 で一致
+- `02_hdmi1_hotplug`
+  - non-wrap pair: 104
+  - wrap: 3
+  - `delta == align1024(prev_payload_len) - 32`: 84
+  - sequence が連続する pair: 84
+  - 連続 sequence では `align1024(prev_payload_len) - 32` が 84 / 84 で一致
+
+解釈:
+
+- `cmd_dest` は type7 JPEG payload ring の書き込み先でほぼ確定。
+- 次の `cmd_dest` は、前回 payload transfer の 1024 byte 境界丸めから bulk command header 32 byte を引いた分だけ進む。
+- sequence が飛んでいる pair で大きな delta になるのは、解析対象外の packet、capture window、または同 ring 内の他 payload が間に入っているためと見るのが自然。
+- type7 group replay を Mac で試す場合、`cmd_dest` は固定値ではなく ring cursor として更新する必要がある。少なくとも連続 tile では:
+
+```text
+next_cmd_dest = cmd_dest + align1024(payload_len) - 32
+```
+
+ここで `payload_len` は type7 payload transfer の長さで、Windows capture 上では `cmd_total_len` と同じ値になっている。
+
+### `start_addr/end_addr` pair の遷移
+
+`tools/t6_type7_timeline.py --address-transition-summary` を追加し、type7
+header の `start_addr/end_addr` pair を target zone ID として集計した。
+
+`05_partial_update`:
+
+- address pair: 45 種
+- steps: 94
+- same pair steps: 32
+- pair changes: 62
+- consecutive sequence の same pair: 19
+- consecutive sequence の pair change: 16
+- 主な pair:
+  - `0xcafcd0-0xe80cd0`: 17回、`64x704`
+  - `0x1932190-0x1aec990`: 7回、`64x224`
+  - `0xc55590-0xe53590`: 6回、`64x224`, `320x224`, `1216x224`, `1216x928`
+  - `0xd45cb0-0xecbcb0`: 6回、`64x64`, `96x64`
+
+`02_hdmi1_hotplug`:
+
+- address pair: 12 種
+- steps: 107
+- same pair steps: 62
+- pair changes: 45
+- consecutive sequence の same pair: 56
+- consecutive sequence の pair change: 29
+- 主な pair:
+  - `0x30-0x1fe030`: 54回、`64x544`, `1920x736`
+  - `0x18aaaf0-0x1aa8af0`: 16回、`64x64`, `64x96`, `64x544`, `64x1080`, `256x32`, `1248x64`
+  - `0x18ab210-0x1aa9210`: 11回、`64x96`, `96x96`
+  - `0x18aab10-0x1aa8b10`: 9回、`1888x96`
+  - `0x18c8af0-0x1ab7af0`: 7回、`64x480`, `64x1016`
+
+観測:
+
+- 同じ address pair が異なる tile size に再利用されるため、pair は tile の画面座標ではない。
+- hotplug 側は少数の pair が繰り返され、特に `0x30-0x1fe030` は大きめの `1920x736` にも使われる。
+- `64x96`, `1824x96`, `64x480/1016` のような複数 tile group では、pair が左帯/中央帯/残り帯のように切り替わる。
+- `05_partial_update` は pair の種類が多く、UI の細かい dirty では target zone が細分化されるように見える。
+- address pair は `cmd_dest` ring とは独立しており、同じ pair でも `cmd_dest` は広い範囲で変化する。
+
+現時点の実装仮説:
+
+- type7 の実送信では、`cmd_dest` は ring cursor として自前計算できる。
+- 一方で `start_addr/end_addr` は dirty rect の placement / target zone allocator で、まだ自前生成は危険。
+- Mac 側の次の安全な実験は、Windows capture 由来の group を `cmd_dest` 更新込みで replay すること。`start_addr/end_addr` はまず capture 値をそのまま使う。
+
+### type7 JPEG の種類
+
+`tools/t6_type7_timeline.py --jpeg-summary` を追加し、type7 payload の JPEG SOF
+marker と component sampling を集計した。
+
+確認した capture:
+
+- `02_hdmi1_hotplug`: 108 / 108
+- `03_resolution_change`: 137 / 137
+- `04_solid_colors`: 124 / 124
+- `05_partial_update`: 95 / 95
+
+結果:
+
+- すべて `SOF0 = 0xc0`。つまり baseline JPEG。
+- すべて component sampling は `id0:2x2:q0,id1:1x1:q1,id2:1x1:q1`。
+- これは 4:2:0 sampling と見てよい。
+- Windows type7 dirty tile は、少なくとも既存 1080p capture では progressive / 4:2:2 / 4:4:4 を使っていない。
+
+Mac 側への反映:
+
+- type7 replay / generation の初期値は baseline JPEG 4:2:0 に固定する。
+- full-frame path で有効だった JPEG 4:4:4 + yuv444 target は、type7 の再現実験には混ぜない。
+- type7 の色ズレ調査では、まず sampling ではなく `start_addr/end_addr` / target surface / expected output format を疑う。
+
+### Windows full-frame JPEG の sampling
+
+`tools/t6_pcap_summary.py --jpeg-summary --jpeg-summary-only` を追加し、type7 以外の
+JPEG payload も SOF marker / component sampling で集計した。
+
+確認結果:
+
+- `2026-06-19_jua365_win_02_hdmi1_hotplug.pcapng`
+  - `type=0x3`, `1920x1080`, 40 frames
+  - すべて `SOF0 = 0xc0` baseline JPEG
+  - components は `id0:2x2:q0,id1:1x1:q1,id2:1x1:q1`
+  - これは 4:2:0 sampling と見てよい。
+- `2026-06-19_jua365_win_06_4k_hotplug_mid40k.pcapng`
+  - `type=0x4`, `1920x1080`, 1 frame
+  - 同じく baseline JPEG 4:2:0。
+
+現時点の結論:
+
+- 既存 Windows capture では、type7 dirty tile だけでなく、観測済み full-frame
+  JPEG path でも 4:4:4 は使われていない。
+- Mac 側で有効だった `jpeg 444 -> yuv444` は画質改善用の独自 fallback として扱い、
+  Windows 再現 path の初期値にはしない。
+
+### group replay 用 export
+
+`tools/t6_type7_timeline.py --export-groups-json <path>` を追加した。
+
+出力には group ごとに以下を含める:
+
+- pcap 名、session、time range
+- 各 tile の `sequence`, `cmd_dest`, `cmd_total_len`, `payload_len`, `data_len`
+- tile header fields: size, canvas, `start_addr/end_addr`, format
+- JPEG SOF / sampling
+- type7 payload 全体の base64 (`payload_b64`)
+- 近傍 interrupt packets
+
+生成済み sample:
+
+- `captures/type7_hotplug_groups_sample.json`
+- `captures/type7_partial_groups_sample.json`
+
+これは Mac 側 `t6-send-type7` に capture group replay mode を追加するための入力形式として使う。

@@ -66,6 +66,9 @@ class VideoHeader:
     jpeg_soi_offset: int
     jpeg_width: int | None
     jpeg_height: int | None
+    sof_marker: int | None
+    jpeg_precision: int | None
+    jpeg_components: str | None
 
 
 def parse_jpeg_size(data: bytes, soi_offset: int) -> tuple[int, int] | tuple[None, None]:
@@ -112,6 +115,63 @@ def parse_jpeg_size(data: bytes, soi_offset: int) -> tuple[int, int] | tuple[Non
                 return width, height
         pos += seg_len
     return None, None
+
+
+def parse_jpeg_details(data: bytes, soi_offset: int) -> tuple[int | None, int | None, str | None]:
+    if soi_offset < 0 or soi_offset + 4 >= len(data):
+        return None, None, None
+    pos = soi_offset + 2
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        while pos < len(data) and data[pos] == 0xFF:
+            pos += 1
+        if pos >= len(data):
+            break
+        marker = data[pos]
+        pos += 1
+        if marker == 0xDA:
+            break
+        if marker in {0xD8, 0xD9}:
+            continue
+        if pos + 2 > len(data):
+            break
+        seg_len = struct.unpack_from(">H", data, pos)[0]
+        if seg_len < 2 or pos + seg_len > len(data):
+            break
+        if marker in {
+            0xC0,
+            0xC1,
+            0xC2,
+            0xC3,
+            0xC5,
+            0xC6,
+            0xC7,
+            0xC9,
+            0xCA,
+            0xCB,
+            0xCD,
+            0xCE,
+            0xCF,
+        }:
+            if seg_len < 8:
+                break
+            precision = data[pos + 2]
+            comp_count = data[pos + 7]
+            comp_pos = pos + 8
+            comps: list[str] = []
+            for _ in range(comp_count):
+                if comp_pos + 3 > pos + seg_len:
+                    break
+                comp_id = data[comp_pos]
+                sampling = data[comp_pos + 1]
+                qtable = data[comp_pos + 2]
+                comps.append(f"id{comp_id}:{sampling >> 4}x{sampling & 0x0f}:q{qtable}")
+                comp_pos += 3
+            return marker, precision, ",".join(comps)
+        pos += seg_len
+    return None, None, None
 
 
 def parse_int(value: str) -> int | None:
@@ -247,6 +307,9 @@ def parse_video_header(packet: UsbPacket, command: BulkCommand) -> VideoHeader |
     else:
         jpeg_soi_offset = packet.capdata.find(b"\xff\xd8")
     jpeg_width, jpeg_height = parse_jpeg_size(packet.capdata, jpeg_soi_offset)
+    sof_marker, jpeg_precision, jpeg_components = parse_jpeg_details(
+        packet.capdata, jpeg_soi_offset
+    )
     return VideoHeader(
         frame=packet.frame,
         time=packet.time,
@@ -267,6 +330,9 @@ def parse_video_header(packet: UsbPacket, command: BulkCommand) -> VideoHeader |
         jpeg_soi_offset=jpeg_soi_offset,
         jpeg_width=jpeg_width,
         jpeg_height=jpeg_height,
+        sof_marker=sof_marker,
+        jpeg_precision=jpeg_precision,
+        jpeg_components=jpeg_components,
     )
 
 
@@ -284,6 +350,7 @@ def print_command(command: BulkCommand) -> None:
 
 
 def print_video(header: VideoHeader) -> None:
+    sof = f"sof=0x{header.sof_marker:x}" if header.sof_marker is not None else "sof=?"
     print(
         "video\t"
         f"{header.frame}\t{header.time}\t"
@@ -301,8 +368,45 @@ def print_video(header: VideoHeader) -> None:
         f"end=0x{header.end_addr:x}\t"
         f"format=0x{header.image_format:x}\t"
         f"jpeg_soi={header.jpeg_soi_offset}\t"
-        f"jpeg={header.jpeg_width}x{header.jpeg_height}"
+        f"jpeg={header.jpeg_width}x{header.jpeg_height}\t"
+        f"{sof}\t"
+        f"components={header.jpeg_components}"
     )
+
+
+def print_jpeg_summary(headers: list[VideoHeader]) -> None:
+    counts = collections.Counter()
+    sizes = collections.Counter()
+    for header in headers:
+        if header.image_format != 0x0D or header.sof_marker is None:
+            continue
+        key = (header.video_type, header.sof_marker, header.jpeg_components or "?")
+        counts[key] += 1
+        sizes[(header.video_type, header.jpeg_width, header.jpeg_height, header.jpeg_components or "?")] += 1
+
+    print("# jpeg_summary")
+    for (video_type, sof_marker, components), count in sorted(counts.items()):
+        name = {0xC0: "baseline", 0xC1: "extended-sequential", 0xC2: "progressive"}.get(
+            sof_marker, "sof"
+        )
+        print(
+            "jpeg_count\t"
+            f"type=0x{video_type:x}\t"
+            f"count={count}\t"
+            f"sof=0x{sof_marker:02x}\t"
+            f"name={name}\t"
+            f"components={components}"
+        )
+    for (video_type, width, height, components), count in sorted(
+        sizes.items(), key=lambda item: (-item[1], item[0])
+    )[:80]:
+        print(
+            "jpeg_size\t"
+            f"type=0x{video_type:x}\t"
+            f"count={count}\t"
+            f"jpeg={width}x{height}\t"
+            f"components={components}"
+        )
 
 
 def print_interrupt(packet: UsbPacket) -> tuple[int, int, int]:
@@ -326,6 +430,7 @@ def summarize(args: argparse.Namespace) -> int:
     interrupt_counts = collections.Counter()
     pending: BulkCommand | None = None
     commands = videos = interrupts = 0
+    video_headers: list[VideoHeader] = []
     printed = 0
 
     for packet in packets:
@@ -346,6 +451,7 @@ def summarize(args: argparse.Namespace) -> int:
                 header = parse_video_header(packet, pending)
                 if header is not None:
                     videos += 1
+                    video_headers.append(header)
                     video_counts[(header.video_type, header.image_format)] += 1
                     if not args.summary_only and (
                         args.limit is None or printed < args.limit
@@ -375,15 +481,18 @@ def summarize(args: argparse.Namespace) -> int:
     print(f"commands\t{commands}")
     print(f"video_payloads\t{videos}")
     print(f"interrupts\t{interrupts}")
-    for (session, dest), count in sorted(command_counts.items()):
-        print(f"command_count\tsession={session}\tdest=0x{dest:08x}\tcount={count}")
-    for (video_type, image_format), count in sorted(video_counts.items()):
-        print(
-            f"video_count\ttype=0x{video_type:x}\t"
-            f"format=0x{image_format:x}\tcount={count}"
-        )
-    for (flags, event), count in sorted(interrupt_counts.items()):
-        print(f"interrupt_count\tflags=0x{flags:02x}\tevent=0x{event:02x}\tcount={count}")
+    if not args.jpeg_summary_only:
+        for (session, dest), count in sorted(command_counts.items()):
+            print(f"command_count\tsession={session}\tdest=0x{dest:08x}\tcount={count}")
+        for (video_type, image_format), count in sorted(video_counts.items()):
+            print(
+                f"video_count\ttype=0x{video_type:x}\t"
+                f"format=0x{image_format:x}\tcount={count}"
+            )
+        for (flags, event), count in sorted(interrupt_counts.items()):
+            print(f"interrupt_count\tflags=0x{flags:02x}\tevent=0x{event:02x}\tcount={count}")
+    if args.jpeg_summary:
+        print_jpeg_summary(video_headers)
     return 0
 
 
@@ -397,6 +506,12 @@ def main() -> int:
     )
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--video-only", action="store_true")
+    parser.add_argument("--jpeg-summary", action="store_true")
+    parser.add_argument(
+        "--jpeg-summary-only",
+        action="store_true",
+        help="omit verbose count tables when printing --jpeg-summary",
+    )
     parser.add_argument("--limit", type=int)
     return summarize(parser.parse_args())
 
