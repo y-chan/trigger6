@@ -106,6 +106,7 @@ struct Options {
     dry_run: bool,
     ram_size_mb: Option<u8>,
     usb_timeout_ms: u64,
+    wait_interrupt_ms: u64,
     max_packet_size: u32,
     dump_first_frame: Option<PathBuf>,
 }
@@ -665,6 +666,15 @@ struct ProfileSample {
     dirty_probe_convert: Duration,
     dirty_probe_encode: Duration,
     dirty_probe_payload_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct InterruptWaitSummary {
+    packets: u32,
+    fences: u32,
+    jpeg_errors: u32,
+    last_event: u8,
+    last_data: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1486,6 +1496,18 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
     if payload_bytes == 0 && chunks == 0 {
         return Ok(());
     }
+    let interrupt_summary = if options.wait_interrupt_ms > 0 {
+        if let Some(device) = &state.device {
+            Some(wait_for_display_interrupts(
+                device,
+                Duration::from_millis(options.wait_interrupt_ms),
+            )?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     state.sent_frames += 1;
     profile.total = frame_started.elapsed();
@@ -1507,7 +1529,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             0.0
         };
         println!(
-            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}",
+            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}{}",
             state.sent_frames,
             sent_fps,
             state.dropped_frames,
@@ -1529,7 +1551,8 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             profile.dirty_bbox_ratio * 100.0,
             profile.dirty_probe_payload_bytes,
             duration_ms(profile.dirty_probe_convert),
-            duration_ms(profile.dirty_probe_encode)
+            duration_ms(profile.dirty_probe_encode),
+            format_interrupt_summary(interrupt_summary)
         );
         state.last_report_at = now;
         state.last_report_sent_frames = state.sent_frames;
@@ -1769,6 +1792,53 @@ fn crop_bgra_bbox(
             unsafe { std::slice::from_raw_parts(bgra.add((y + row) * stride + x * 4), row_bytes) };
         let dst = &mut out[row * row_bytes..(row + 1) * row_bytes];
         dst.copy_from_slice(src);
+    }
+}
+
+fn wait_for_display_interrupts(
+    device: &T6Device,
+    duration: Duration,
+) -> Result<InterruptWaitSummary, Box<dyn Error>> {
+    let deadline = Instant::now() + duration;
+    let mut summary = InterruptWaitSummary::default();
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let timeout = (deadline - now).min(Duration::from_millis(10));
+        match device.read_interrupt_once_timeout(timeout) {
+            Ok(interrupt) => {
+                summary.packets = summary.packets.saturating_add(1);
+                summary.last_event = interrupt.display_event;
+                summary.last_data = interrupt.display_data;
+                if interrupt.has_fence_id {
+                    summary.fences = summary.fences.saturating_add(1);
+                }
+                if interrupt.has_jpeg_error {
+                    summary.jpeg_errors = summary.jpeg_errors.saturating_add(1);
+                }
+            }
+            Err(rusb::Error::Timeout) => break,
+            Err(error) => return Err(format!("interrupt read error: {error}").into()),
+        }
+    }
+
+    Ok(summary)
+}
+
+fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
+    match summary {
+        Some(summary) => format!(
+            " interrupts={} fences={} jpeg_errors={} last_event=0x{:02x} last_data=0x{:08x}",
+            summary.packets,
+            summary.fences,
+            summary.jpeg_errors,
+            summary.last_event,
+            summary.last_data
+        ),
+        None => String::new(),
     }
 }
 
@@ -2465,6 +2535,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut dry_run = false;
     let mut ram_size_mb = None;
     let mut usb_timeout_ms = 3000;
+    let mut wait_interrupt_ms = 0;
     let mut max_packet_size = DEFAULT_MAX_BULK_PACKET_SIZE;
     let mut dump_first_frame = None;
     let mut args = env::args().skip(1);
@@ -2513,6 +2584,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--ram-size-mb" => ram_size_mb = Some(next_value(&mut args, "--ram-size-mb")?.parse()?),
             "--usb-timeout-ms" => {
                 usb_timeout_ms = next_value(&mut args, "--usb-timeout-ms")?.parse()?
+            }
+            "--wait-interrupt-ms" => {
+                wait_interrupt_ms = next_value(&mut args, "--wait-interrupt-ms")?.parse()?
             }
             "--max-packet" => max_packet_size = parse_u32(&next_value(&mut args, "--max-packet")?)?,
             "--dump-first-frame" => {
@@ -2564,6 +2638,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         dry_run,
         ram_size_mb,
         usb_timeout_ms,
+        wait_interrupt_ms,
         max_packet_size,
         dump_first_frame,
     })
@@ -2716,6 +2791,7 @@ Options:\n\
     --dry-run               Capture/encode/packetize but do not open USB or send\n\
     --ram-size-mb N         RAM size for dry-run address planning, default 58\n\
     --usb-timeout-ms N      USB transfer timeout, default 3000\n\
+    --wait-interrupt-ms N   After each sent frame, read display interrupts for up to N ms, default 0\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
     --dump-first-frame PATH Save the first captured BGRA frame after RGB conversion"
     );

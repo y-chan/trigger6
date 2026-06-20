@@ -140,9 +140,13 @@ impl T6Device {
     }
 
     pub fn read_interrupt_once(&self) -> rusb::Result<DisplayInterrupt> {
+        self.read_interrupt_once_timeout(self.timeout)
+    }
+
+    pub fn read_interrupt_once_timeout(&self, timeout: Duration) -> rusb::Result<DisplayInterrupt> {
         let mut packet = [0; INTERRUPT_PACKET_SIZE];
         self.handle
-            .read_interrupt(EP_INTERRUPT_IN, &mut packet, self.timeout)?;
+            .read_interrupt(EP_INTERRUPT_IN, &mut packet, timeout)?;
         Ok(DisplayInterrupt::parse(&packet))
     }
 
