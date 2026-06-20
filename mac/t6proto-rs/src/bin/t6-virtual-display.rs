@@ -107,6 +107,7 @@ struct Options {
     ram_size_mb: Option<u8>,
     usb_timeout_ms: u64,
     wait_interrupt_ms: u64,
+    dump_interrupts: u32,
     max_packet_size: u32,
     dump_first_frame: Option<PathBuf>,
 }
@@ -230,6 +231,7 @@ struct SenderState {
     bgra_scratch: Vec<u8>,
     dirty_bgra_scratch: Vec<u8>,
     current_quality: i32,
+    remaining_interrupt_dumps: u32,
     frame_interval: Duration,
     next_send_at: Instant,
     started_at: Instant,
@@ -753,6 +755,7 @@ fn build_sender_state(
         None
     };
     let current_quality = options.quality;
+    let remaining_interrupt_dumps = options.dump_interrupts;
     Ok(SenderState {
         frame_interval: Duration::from_secs_f64(1.0 / f64::from(options.fps.max(1))),
         next_send_at: Instant::now(),
@@ -777,6 +780,7 @@ fn build_sender_state(
         bgra_scratch: Vec::new(),
         dirty_bgra_scratch: Vec::new(),
         current_quality,
+        remaining_interrupt_dumps,
     })
 }
 
@@ -1501,6 +1505,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             Some(wait_for_display_interrupts(
                 device,
                 Duration::from_millis(options.wait_interrupt_ms),
+                &mut state.remaining_interrupt_dumps,
             )?)
         } else {
             None
@@ -1798,6 +1803,7 @@ fn crop_bgra_bbox(
 fn wait_for_display_interrupts(
     device: &T6Device,
     duration: Duration,
+    remaining_dumps: &mut u32,
 ) -> Result<InterruptWaitSummary, Box<dyn Error>> {
     let deadline = Instant::now() + duration;
     let mut summary = InterruptWaitSummary::default();
@@ -1808,8 +1814,13 @@ fn wait_for_display_interrupts(
             break;
         }
         let timeout = (deadline - now).min(Duration::from_millis(10));
-        match device.read_interrupt_once_timeout(timeout) {
-            Ok(interrupt) => {
+        match device.read_interrupt_packet_timeout(timeout) {
+            Ok(packet) => {
+                if *remaining_dumps > 0 {
+                    println!("interrupt_raw={}", hex_bytes(&packet));
+                    *remaining_dumps -= 1;
+                }
+                let interrupt = t6proto::DisplayInterrupt::parse(&packet);
                 summary.packets = summary.packets.saturating_add(1);
                 summary.last_event = interrupt.display_event;
                 summary.last_data = interrupt.display_data;
@@ -1840,6 +1851,18 @@ fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
         ),
         None => String::new(),
     }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 fn drop_late_frame(state: &mut SenderState, mut profile: ProfileSample, frame_started: Instant) {
@@ -2536,6 +2559,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut ram_size_mb = None;
     let mut usb_timeout_ms = 3000;
     let mut wait_interrupt_ms = 0;
+    let mut dump_interrupts = 0;
     let mut max_packet_size = DEFAULT_MAX_BULK_PACKET_SIZE;
     let mut dump_first_frame = None;
     let mut args = env::args().skip(1);
@@ -2588,6 +2612,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--wait-interrupt-ms" => {
                 wait_interrupt_ms = next_value(&mut args, "--wait-interrupt-ms")?.parse()?
             }
+            "--dump-interrupts" => {
+                dump_interrupts = next_value(&mut args, "--dump-interrupts")?.parse()?
+            }
             "--max-packet" => max_packet_size = parse_u32(&next_value(&mut args, "--max-packet")?)?,
             "--dump-first-frame" => {
                 dump_first_frame = Some(PathBuf::from(next_value(&mut args, "--dump-first-frame")?))
@@ -2639,6 +2666,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         ram_size_mb,
         usb_timeout_ms,
         wait_interrupt_ms,
+        dump_interrupts,
         max_packet_size,
         dump_first_frame,
     })
@@ -2792,6 +2820,7 @@ Options:\n\
     --ram-size-mb N         RAM size for dry-run address planning, default 58\n\
     --usb-timeout-ms N      USB transfer timeout, default 3000\n\
     --wait-interrupt-ms N   After each sent frame, read display interrupts for up to N ms, default 0\n\
+    --dump-interrupts N     Print the first N raw interrupt packets; use with --wait-interrupt-ms\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
     --dump-first-frame PATH Save the first captured BGRA frame after RGB conversion"
     );
