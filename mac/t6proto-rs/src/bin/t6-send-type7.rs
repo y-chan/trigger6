@@ -28,6 +28,7 @@ struct Options {
     max_packet_size: u32,
     wait_interrupt_ms: u64,
     dump_interrupts: u32,
+    dump_header: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         options.start_addr,
         options.end_addr,
     );
+    if options.dump_header {
+        let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE;
+        println!("type7_header={}", hex_bytes(&packet.payload[..header_len]));
+    }
 
     if options.dry_run {
         println!("Dry run; type7 tile was not sent.");
@@ -91,8 +96,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     for (index, chunk) in chunks.iter().enumerate() {
-        device.write_display_bulk(&chunk.header.to_bytes())?;
-        device.write_display_bulk(chunk.data)?;
+        if let Err(error) = device.write_display_bulk(&chunk.header.to_bytes()) {
+            if options.wait_interrupt_ms > 0 {
+                let _ = wait_for_interrupts(
+                    &device,
+                    options.sequence,
+                    Duration::from_millis(options.wait_interrupt_ms),
+                    options.dump_interrupts,
+                );
+            }
+            return Err(format!(
+                "type7 bulk header error at chunk {}/{} offset={} size={}: {error}",
+                index + 1,
+                chunks.len(),
+                chunk.header.packet_offset,
+                chunk.header.packet_size
+            )
+            .into());
+        }
+        if let Err(error) = device.write_display_bulk(chunk.data) {
+            if options.wait_interrupt_ms > 0 {
+                let _ = wait_for_interrupts(
+                    &device,
+                    options.sequence,
+                    Duration::from_millis(options.wait_interrupt_ms),
+                    options.dump_interrupts,
+                );
+            }
+            return Err(format!(
+                "type7 bulk data error at chunk {}/{} offset={} size={}: {error}",
+                index + 1,
+                chunks.len(),
+                chunk.header.packet_offset,
+                chunk.header.packet_size
+            )
+            .into());
+        }
         println!(
             "sent chunk {}/{} offset={} size={}",
             index + 1,
@@ -188,6 +227,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut max_packet_size = DEFAULT_MAX_BULK_PACKET_SIZE;
     let mut wait_interrupt_ms = 0;
     let mut dump_interrupts = 0;
+    let mut dump_header = false;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -213,6 +253,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--dump-interrupts" => {
                 dump_interrupts = next_value(&mut args, "--dump-interrupts")?.parse()?
             }
+            "--dump-header" => dump_header = true,
             "--ready" => ready = true,
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
@@ -250,6 +291,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         max_packet_size,
         wait_interrupt_ms,
         dump_interrupts,
+        dump_header,
     })
 }
 
@@ -313,6 +355,7 @@ Options:\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
     --wait-interrupt-ms N   Read interrupts after send for up to N ms\n\
     --dump-interrupts N     Print first N raw interrupt packets\n\
+    --dump-header           Print the 48-byte type7 video header before sending\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\
