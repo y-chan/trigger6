@@ -85,18 +85,14 @@ function drawBackground() {
 
 function drawModal(modal, progress, phaseLabel, frame) {
   drawBackground();
-  const alpha = progress * 0.52;
-  ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+  ctx.fillStyle = `rgba(0, 0, 0, ${progress * 0.52})`;
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-  const scale = 0.96 + 0.04 * progress;
-  const slide = Math.round((1 - progress) * 28);
-  const cx = modal.x + modal.w / 2;
-  const cy = modal.y + modal.h / 2;
-  const x = Math.round(cx - modal.w * scale / 2);
-  const y = Math.round(cy - modal.h * scale / 2 + slide);
-  const w = Math.round(modal.w * scale);
-  const h = Math.round(modal.h * scale);
+  const x = modal.x;
+  const y = modal.y;
+  const w = modal.w;
+  const h = modal.h;
+  ctx.globalAlpha = progress;
   drawRoundedRect(x, y, w, h, 10, "#f5f7fb", "#ffffff");
   ctx.fillStyle = "#111316";
   ctx.font = "34px monospace";
@@ -112,6 +108,7 @@ function drawModal(modal, progress, phaseLabel, frame) {
   ctx.fillStyle = "#ffffff";
   ctx.font = "22px monospace";
   ctx.fillText("OK", x + w - 130, y + h - 44);
+  ctx.globalAlpha = 1;
   console.log("frame", frame, "modal", modal.label, "progress", progress.toFixed(3), "bbox", x, y, w, h);
 }
 
