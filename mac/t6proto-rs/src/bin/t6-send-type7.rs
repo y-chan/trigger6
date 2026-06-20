@@ -2,8 +2,10 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use image::RgbImage;
 use image::imageops::FilterType;
 use t6proto::usb::T6Device;
 use t6proto::{DEFAULT_MAX_BULK_PACKET_SIZE, Type7JpegTilePacket};
@@ -33,61 +35,21 @@ struct Options {
     wait_interrupt_ms: u64,
     dump_interrupts: u32,
     dump_header: bool,
+    scan_known_addresses: bool,
+    scan_sleep_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InputKind {
     Jpeg,
     Image,
+    SolidWhite,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
-    let jpeg = if options.input_kind == InputKind::Image {
-        encode_image_to_jpeg(
-            &options.input_path,
-            options.width,
-            options.height,
-            options.crop_x,
-            options.crop_y,
-            options.quality,
-            options.subsamp,
-        )?
-    } else {
-        fs::read(&options.input_path)?
-    };
+    let jpeg = build_jpeg(&options)?;
     let jpeg_info = parse_jpeg_info(&jpeg)?;
-    let packet = Type7JpegTilePacket::new(
-        &jpeg,
-        options.payload_addr,
-        options.sequence,
-        options.width,
-        options.height,
-        options.canvas_width,
-        options.canvas_height,
-        options.start_addr,
-        options.end_addr,
-    );
-    let chunks = packet.bulk_chunks(options.max_packet_size);
-
-    println!(
-        "Sending type7 jpeg tile size={}x{} jpeg_bytes={} payload_bytes={} chunks={} payload_addr=0x{:08x} seq=0x{:08x} canvas={}x{} start=0x{:08x} end=0x{:08x}",
-        options.width,
-        options.height,
-        jpeg.len(),
-        packet.payload.len(),
-        chunks.len(),
-        options.payload_addr,
-        options.sequence,
-        options.canvas_width,
-        options.canvas_height,
-        options.start_addr,
-        options.end_addr,
-    );
-    if options.dump_header {
-        let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE;
-        println!("type7_header={}", hex_bytes(&packet.payload[..header_len]));
-    }
     println!(
         "JPEG info: marker=0x{:02x} progressive={} components={} sampling={}",
         jpeg_info.sof_marker,
@@ -96,8 +58,37 @@ fn main() -> Result<(), Box<dyn Error>> {
         jpeg_info.sampling_summary()
     );
 
+    let address_pairs = if options.scan_known_addresses {
+        known_address_pairs().to_vec()
+    } else {
+        vec![(options.start_addr, options.end_addr)]
+    };
+    let mut payload_addr = options.payload_addr;
+    let mut sequence = options.sequence;
+
     if options.dry_run {
-        println!("Dry run; type7 tile was not sent.");
+        for (index, &(start_addr, end_addr)) in address_pairs.iter().enumerate() {
+            let packet = make_packet(
+                &options,
+                &jpeg,
+                payload_addr,
+                sequence,
+                start_addr,
+                end_addr,
+            );
+            print_packet_summary(
+                &options,
+                &packet,
+                index + 1,
+                address_pairs.len(),
+                sequence,
+                start_addr,
+                end_addr,
+            );
+            payload_addr = next_ring_addr(payload_addr, packet.payload.len());
+            sequence = sequence.wrapping_add(1);
+        }
+        println!("Dry run; type7 tiles were not sent.");
         return Ok(());
     }
 
@@ -121,12 +112,126 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Sent JPEG engine reset.");
     }
 
+    for (index, &(start_addr, end_addr)) in address_pairs.iter().enumerate() {
+        let packet = make_packet(
+            &options,
+            &jpeg,
+            payload_addr,
+            sequence,
+            start_addr,
+            end_addr,
+        );
+        print_packet_summary(
+            &options,
+            &packet,
+            index + 1,
+            address_pairs.len(),
+            sequence,
+            start_addr,
+            end_addr,
+        );
+        send_packet(&device, &options, &packet, sequence)?;
+        payload_addr = next_ring_addr(payload_addr, packet.payload.len());
+        sequence = sequence.wrapping_add(1);
+
+        if options.scan_known_addresses && index + 1 < address_pairs.len() {
+            thread::sleep(Duration::from_millis(options.scan_sleep_ms));
+        }
+    }
+
+    Ok(())
+}
+
+fn build_jpeg(options: &Options) -> Result<Vec<u8>, Box<dyn Error>> {
+    match options.input_kind {
+        InputKind::Image => encode_image_to_jpeg(
+            &options.input_path,
+            options.width,
+            options.height,
+            options.crop_x,
+            options.crop_y,
+            options.quality,
+            options.subsamp,
+        ),
+        InputKind::Jpeg => Ok(fs::read(&options.input_path)?),
+        InputKind::SolidWhite => encode_solid_white_to_jpeg(
+            options.width,
+            options.height,
+            options.quality,
+            options.subsamp,
+        ),
+    }
+}
+
+fn make_packet(
+    options: &Options,
+    jpeg: &[u8],
+    payload_addr: u32,
+    sequence: u32,
+    start_addr: u32,
+    end_addr: u32,
+) -> Type7JpegTilePacket {
+    Type7JpegTilePacket::new(
+        jpeg,
+        payload_addr,
+        sequence,
+        options.width,
+        options.height,
+        options.canvas_width,
+        options.canvas_height,
+        start_addr,
+        end_addr,
+    )
+}
+
+fn print_packet_summary(
+    options: &Options,
+    packet: &Type7JpegTilePacket,
+    scan_index: usize,
+    scan_count: usize,
+    sequence: u32,
+    start_addr: u32,
+    end_addr: u32,
+) {
+    let chunks = packet.bulk_chunks(options.max_packet_size);
+    println!(
+        "Sending type7 jpeg tile {}/{} size={}x{} jpeg_bytes={} payload_bytes={} chunks={} payload_addr=0x{:08x} seq=0x{:08x} canvas={}x{} start=0x{:08x} end=0x{:08x}",
+        scan_index,
+        scan_count,
+        options.width,
+        options.height,
+        packet
+            .payload
+            .len()
+            .saturating_sub(t6proto::TYPE7_JPEG_TILE_HEADER_SIZE),
+        packet.payload.len(),
+        chunks.len(),
+        packet.payload_address,
+        sequence,
+        options.canvas_width,
+        options.canvas_height,
+        start_addr,
+        end_addr,
+    );
+    if options.dump_header {
+        let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE;
+        println!("type7_header={}", hex_bytes(&packet.payload[..header_len]));
+    }
+}
+
+fn send_packet(
+    device: &T6Device,
+    options: &Options,
+    packet: &Type7JpegTilePacket,
+    sequence: u32,
+) -> Result<(), Box<dyn Error>> {
+    let chunks = packet.bulk_chunks(options.max_packet_size);
     for (index, chunk) in chunks.iter().enumerate() {
         if let Err(error) = device.write_display_bulk(&chunk.header.to_bytes()) {
             if options.wait_interrupt_ms > 0 {
                 let _ = wait_for_interrupts(
-                    &device,
-                    options.sequence,
+                    device,
+                    sequence,
                     Duration::from_millis(options.wait_interrupt_ms),
                     options.dump_interrupts,
                 );
@@ -143,8 +248,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Err(error) = device.write_display_bulk(chunk.data) {
             if options.wait_interrupt_ms > 0 {
                 let _ = wait_for_interrupts(
-                    &device,
-                    options.sequence,
+                    device,
+                    sequence,
                     Duration::from_millis(options.wait_interrupt_ms),
                     options.dump_interrupts,
                 );
@@ -169,14 +274,33 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if options.wait_interrupt_ms > 0 {
         wait_for_interrupts(
-            &device,
-            options.sequence,
+            device,
+            sequence,
             Duration::from_millis(options.wait_interrupt_ms),
             options.dump_interrupts,
         )?;
     }
 
     Ok(())
+}
+
+fn next_ring_addr(payload_addr: u32, payload_len: usize) -> u32 {
+    let aligned = ((payload_len as u32).saturating_add(0x3ff)) & !0x3ff;
+    payload_addr.wrapping_add(aligned.saturating_sub(32))
+}
+
+fn known_address_pairs() -> &'static [(u32, u32)] {
+    &[
+        (0x0000_0030, 0x001f_e030),
+        (0x018a_aaf0, 0x01aa_8af0),
+        (0x018a_b210, 0x01aa_9210),
+        (0x018a_ab10, 0x01aa_8b10),
+        (0x018c_8af0, 0x01ab_7af0),
+        (0x00ca_fcd0, 0x00e8_0cd0),
+        (0x0193_2190, 0x01ae_c990),
+        (0x00c5_5590, 0x00e5_3590),
+        (0x00d4_5cb0, 0x00ec_bcb0),
+    ]
 }
 
 fn wait_for_interrupts(
@@ -258,6 +382,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut wait_interrupt_ms = 0;
     let mut dump_interrupts = 0;
     let mut dump_header = false;
+    let mut solid_white = false;
+    let mut scan_known_addresses = false;
+    let mut scan_sleep_ms = 100;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -288,6 +415,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
                 dump_interrupts = next_value(&mut args, "--dump-interrupts")?.parse()?
             }
             "--dump-header" => dump_header = true,
+            "--solid-white" => solid_white = true,
+            "--scan-known-addresses" => scan_known_addresses = true,
+            "--scan-sleep-ms" => {
+                scan_sleep_ms = next_value(&mut args, "--scan-sleep-ms")?.parse()?
+            }
             "--ready" => ready = true,
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
@@ -300,11 +432,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         }
     }
 
-    let (input_path, input_kind) = match (jpeg_path, image_path) {
-        (Some(jpeg_path), None) => (jpeg_path, InputKind::Jpeg),
-        (None, Some(image_path)) => (image_path, InputKind::Image),
-        (None, None) => return Err("--jpeg or --image is required".into()),
-        (Some(_), Some(_)) => return Err("use only one of --jpeg or --image".into()),
+    let (input_path, input_kind) = match (jpeg_path, image_path, solid_white) {
+        (Some(jpeg_path), None, false) => (jpeg_path, InputKind::Jpeg),
+        (None, Some(image_path), false) => (image_path, InputKind::Image),
+        (None, None, true) => (PathBuf::new(), InputKind::SolidWhite),
+        (None, None, false) => return Err("--jpeg, --image, or --solid-white is required".into()),
+        _ => return Err("use only one of --jpeg, --image, or --solid-white".into()),
     };
 
     Ok(Options {
@@ -330,6 +463,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         wait_interrupt_ms,
         dump_interrupts,
         dump_header,
+        scan_known_addresses,
+        scan_sleep_ms,
     })
 }
 
@@ -352,6 +487,21 @@ fn encode_image_to_jpeg(
             .to_rgb8(),
         _ => return Err("--crop-x and --crop-y must be specified together".into()),
     };
+    let jpeg = turbojpeg::compress_image(&rgb, quality, subsamp)?;
+    Ok(jpeg.to_vec())
+}
+
+fn encode_solid_white_to_jpeg(
+    width: u16,
+    height: u16,
+    quality: i32,
+    subsamp: Subsamp,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let rgb = RgbImage::from_pixel(
+        u32::from(width),
+        u32::from(height),
+        image::Rgb([255, 255, 255]),
+    );
     let jpeg = turbojpeg::compress_image(&rgb, quality, subsamp)?;
     Ok(jpeg.to_vec())
 }
@@ -512,7 +662,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: t6-send-type7 (--jpeg tile.jpg | --image image.png) [options]\n\
+        "Usage: t6-send-type7 (--jpeg tile.jpg | --image image.png | --solid-white) [options]\n\
 Options:\n\
     --width N               Tile width, default 64\n\
     --height N              Tile height, default 1080\n\
@@ -530,6 +680,9 @@ Options:\n\
     --wait-interrupt-ms N   Read interrupts after send for up to N ms\n\
     --dump-interrupts N     Print first N raw interrupt packets\n\
     --dump-header           Print the 48-byte type7 video header before sending\n\
+    --solid-white           Generate a solid white JPEG tile instead of reading an input file\n\
+    --scan-known-addresses  Send the tile to known Windows-captured start/end address pairs\n\
+    --scan-sleep-ms N       Sleep between scanned address pairs, default 100\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\

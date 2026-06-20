@@ -513,3 +513,54 @@ JPEG payload も SOF marker / component sampling で集計した。
 - `captures/type7_partial_groups_sample.json`
 
 これは Mac 側 `t6-send-type7` に capture group replay mode を追加するための入力形式として使う。
+
+### type7 address pair scan 実験
+
+`t6-send-type7` に、単色白 tile を生成して既知の Windows capture 由来
+`start_addr/end_addr` pair へ順番に送る実験モードを追加した。
+
+目的:
+
+- type7 decoder path では JPEG 4:2:0 が前提か確認する。
+- `start_addr/end_addr` pair ごとに、描画される、色が壊れる、何も出ない、固まる、を人間が観察して分類する。
+- `cmd_dest` は固定せず、連続 tile ごとに ring cursor として進める。
+
+実行例:
+
+```sh
+cargo run --features usb --bin t6-send-type7 -- \
+  --solid-white \
+  --width 64 \
+  --height 64 \
+  --quality 90 \
+  --subsamp 420 \
+  --scan-known-addresses \
+  --scan-sleep-ms 100 \
+  --wait-interrupt-ms 100
+```
+
+`--scan-known-addresses` では次の pair を順に送る。
+
+- `0x00000030-0x001fe030`
+- `0x018aaaf0-0x01aa8af0`
+- `0x018ab210-0x01aa9210`
+- `0x018aab10-0x01aa8b10`
+- `0x018c8af0-0x01ab7af0`
+- `0x00cafcd0-0x00e80cd0`
+- `0x01932190-0x01aec990`
+- `0x00c55590-0x00e53590`
+- `0x00d45cb0-0x00ecbcb0`
+
+確認点:
+
+- 白 tile がどこかに出るか。
+- 赤/緑崩れが 4:2:0 でも残るか。
+- pair ごとに描画範囲や overlay の出方が変わるか。
+- ack は返るが描画されない pair があるか。
+- 送信後にデバイスが固まる pair があるか。
+
+注意:
+
+- これは placement を自動解決するものではなく、有効 zone を分類するための実験。
+- デバイスが固まった場合は抜き差しで復旧する前提。
+- `--dry-run` を付けると、送信せず JPEG sampling と ring cursor 更新だけ確認できる。
