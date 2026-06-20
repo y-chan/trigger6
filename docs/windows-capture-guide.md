@@ -1,6 +1,10 @@
 # Windows Type7 Capture Handoff
 
-目的は、JUA365 / T6 の 1080p JPEG dirty tile path である `type=0x7` の「画面上の位置」と USB header field の対応を明確にすること。
+目的は、JUA365 / T6 の 1080p JPEG dirty tile path である `type=0x7` について、次を明確にすること。
+
+- 画面上の位置と USB header field の対応。
+- 実際に送られている JPEG の種類、特に baseline/progressive と chroma subsampling。
+- 大きい画面変化時に、type7 tile を大量に送るのか、full-frame JPEG path に切り替えるのか。
 
 Mac 側では次が確認済み。
 
@@ -10,7 +14,7 @@ Mac 側では次が確認済み。
 - ただし `start_addr/end_addr` だけではまだ正しい表示位置を再現できていない。
 - `crop-x` を変えても表示位置は動かず、tile 内の内容だけが変わる。
 
-したがって Windows 側では、既知位置の小さい矩形を動かして USBPcap/tshark capture を取り、`type=0x7` の `start_addr/end_addr/cmd_dest/sequence/width/height` と画面座標の対応を見る。
+したがって Windows 側では、既知位置の小さい矩形を動かす capture、JPEG 種類を見る capture、大きい画面変化を見る capture を必ず分けて取る。大きい payload が混ざると解析しづらいので、通常の位置対応 capture に full-screen update や動画再生を混ぜない。
 
 ## 必要なもの
 
@@ -35,6 +39,8 @@ capture 中は個人情報や通知を出さない。外部ディスプレイに
 
 HTML でも小さい native app でもよい。重要なのは、黒背景上に単色矩形を段階的に表示すること。
 
+### Capture A: 小さい矩形の位置対応
+
 推奨パターン:
 
 1. 黒背景のみで 2 秒停止。
@@ -48,6 +54,37 @@ HTML でも小さい native app でもよい。重要なのは、黒背景上に
 9. 黒背景に戻して 1 秒停止。
 
 追加で取れるなら、同じ手順を `96x96` と `64x224` でも行う。既存 capture に近い tile size なので解析しやすい。
+
+### Capture B: JPEG 種類の確認
+
+目的は、Windows driver が dirty tile に使う JPEG が 4:2:0 / 4:2:2 / 4:4:4 のどれか、baseline か progressive かを見ること。
+
+推奨パターン:
+
+1. 黒背景のみで 2 秒停止。
+2. 赤・緑・青・白の縦帯を含む `256x256` 矩形を `(0, 0)` に表示し 1 秒停止。
+3. 同じ矩形を `(512, 256)` に移動し 1 秒停止。
+4. 文字を含む `512x256` 矩形を表示し 1 秒停止。
+5. 黒背景に戻して 1 秒停止。
+
+色帯と文字を入れる理由は、chroma subsampling と decoder target format のズレが見えやすいから。
+
+### Capture C: 大きい画面変化
+
+目的は、大きい更新で Windows driver がどの戦略を使うかを見ること。
+
+これは Capture A/B とは必ず別ファイルにする。大きい画面変化は巨大 payload や大量 tile を発生させ、位置対応や JPEG sampling の解析を邪魔するため。
+
+推奨パターン:
+
+1. 黒背景のみで 2 秒停止。
+2. 画面全体を赤にして 1 秒停止。
+3. 画面全体を緑にして 1 秒停止。
+4. 画面全体を青にして 1 秒停止。
+5. 画面全体を白黒チェッカーボードにして 1 秒停止。
+6. 黒背景に戻して 1 秒停止。
+
+ここでは `type=0x7` tile が大量に出るのか、`type=0x3/type=0x4` full-frame JPEG が出るのか、または別 session/path に切り替わるのかを見る。
 
 ## Capture 方法
 
@@ -81,16 +118,26 @@ tshark -i \\.\USBPcap1 -w win_type7_rect_64x64_positions.pcapng
 win_type7_rect_64x64_positions.pcapng
 win_type7_rect_96x96_positions.pcapng
 win_type7_rect_64x224_positions.pcapng
+win_type7_jpeg_sampling_patterns.pcapng
+win_type7_large_changes.pcapng
 ```
 
 ## 高 snaplen capture
 
-今回の主目的は header と interrupt なので通常 capture で足りる可能性が高い。ただし JPEG payload も完全に取りたい場合は `USBPcapCMD.exe` を使う。
+通常の位置対応 capture は header と interrupt が主目的なので、Wireshark/tshark の通常 capture でよい。巨大 payload を完全取得しようとしない。
+
+JPEG payload の完全取得が必要な場合だけ、別ファイルとして `USBPcapCMD.exe` の high snaplen capture を取る。通常 capture と high snaplen capture を混ぜない。
 
 例:
 
 ```powershell
-USBPcapCMD.exe -d \\.\USBPcap1 -A -s 2000000 -b 134217728 -o win_type7_rect_64x64_positions_fullsnap.pcap
+USBPcapCMD.exe -d \\.\USBPcap1 -A -s 2000000 -b 134217728 -o win_type7_jpeg_sampling_patterns_fullsnap.pcap
+```
+
+大きい画面変化の high snaplen capture が必要な場合も、短時間で別ファイルにする。
+
+```powershell
+USBPcapCMD.exe -d \\.\USBPcap1 -A -s 2000000 -b 134217728 -o win_type7_large_changes_fullsnap.pcap
 ```
 
 ## Capture 後の確認
@@ -107,6 +154,13 @@ type7 timeline を見る。
 python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapng --limit-groups 80 --verbose --address-summary
 ```
 
+大きい画面変化 capture は、まず video type の比率を見る。
+
+```sh
+python3 tools/t6_pcap_summary.py captures/win_type7_large_changes.pcapng --summary-only
+python3 tools/t6_pcap_summary.py captures/win_type7_large_changes.pcapng | rg "video|type=|jpeg="
+```
+
 見る点:
 
 - `type7_rows` が出ているか。
@@ -115,12 +169,18 @@ python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapn
 - `cmd_dest` が単なる payload buffer か、位置や surface と連動するか。
 - sequence と interrupt `event=0x04 value=...` が一致するか。
 - 1回の矩形移動が単独 tile か、複数 tile group か。
+- JPEG SOF が `0xc0` baseline か、`0xc2` progressive か。
+- JPEG sampling が `id1:2x2,id2:1x1,id3:1x1` など 4:2:0 か、`1x1` の 4:4:4 か。
+- 大きい画面変化で `type=0x7` が継続するか、`type=0x3/type=0x4` full-frame JPEG に切り替わるか。
+- 大きい画面変化時の payload bytes、tile count、ack/fence の増え方。
 
 ## 期待する成果物
 
 最低限ほしいもの:
 
 - `captures/win_type7_rect_64x64_positions.pcapng`
+- `captures/win_type7_jpeg_sampling_patterns.pcapng`
+- `captures/win_type7_large_changes.pcapng`
 - 実行した矩形位置リスト
 - Windows の表示設定メモ
   - 解像度
@@ -135,6 +195,13 @@ python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapn
 - high snaplen 版 capture
 - テストパターンの HTML / app / script
 
+注意:
+
+- `win_type7_rect_*` には大きい画面変化を入れない。
+- `win_type7_jpeg_sampling_patterns` には小-中サイズの色帯/文字矩形だけを入れる。
+- `win_type7_large_changes` は大きい更新専用にする。
+- high snaplen は必要時だけ、通常 capture と別名で保存する。
+
 ## 解析で判定したいこと
 
 この capture で答えたい質問:
@@ -143,6 +210,9 @@ python3 tools/t6_type7_timeline.py captures/win_type7_rect_64x64_positions.pcapn
 - 画面 x/y の変化に対応して変わる field はどれか。
 - `cmd_dest` は payload ring buffer だけか、表示位置にも関係するか。
 - 複数 tile group の中で、tile の並び順と画面上の位置に規則があるか。
+- Windows driver の type7 JPEG は 420/422/444 のどれか。
+- Mac 側で赤/緑だけに見えている原因は JPEG sampling か、decoder target surface format か、placement/stride か。
+- 大きい画面変化では dirty tile path を使い続けるのか、full-frame path を使うのか。
 - Mac 側 `t6-send-type7` で再現すべき最小単位は、単独 tile か、group 全体か。
 
 この対応が見えたら、Mac 側では `t6-send-type7` に capture 由来の tile group replay mode を追加し、次に `t6-virtual-display` の dirty rect path へ戻す。
