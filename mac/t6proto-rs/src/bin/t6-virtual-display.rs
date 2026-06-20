@@ -3,7 +3,9 @@ use std::error::Error;
 use std::ffi::CStr;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::ptr;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ use t6proto::{
     VIDEO_FLAG_RESET_JPEG, VramLayout,
 };
 use turbojpeg::Subsamp;
+use turbojpeg_sys as tj;
 
 type FrameCallback = extern "C" fn(
     u32,
@@ -27,6 +30,14 @@ type FrameCallback = extern "C" fn(
     usize,
     usize,
     usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    u64,
+    *const DirtyRect,
     usize,
     *mut c_void,
 );
@@ -48,6 +59,24 @@ unsafe extern "C" {
     fn t6_vd_last_error() -> *const std::ffi::c_char;
 }
 
+#[repr(C)]
+struct VImageBuffer {
+    data: *mut c_void,
+    height: usize,
+    width: usize,
+    row_bytes: usize,
+}
+
+unsafe extern "C" {
+    fn vImageRotate90_ARGB8888(
+        src: *const VImageBuffer,
+        dest: *const VImageBuffer,
+        rotation_constant: u8,
+        back_color: *const u8,
+        flags: u32,
+    ) -> isize;
+}
+
 #[derive(Clone, Debug)]
 struct Options {
     display_index: u8,
@@ -57,6 +86,8 @@ struct Options {
     fps: u32,
     frames: Option<u32>,
     quality: i32,
+    adaptive_quality: bool,
+    min_quality: i32,
     subsamp: JpegSubsampling,
     jpeg_target: JpegTarget,
     chroma_mode: ChromaMode,
@@ -67,7 +98,11 @@ struct Options {
     raw_bulk_mode: RawBulkMode,
     ready: bool,
     power_on: bool,
+    reset_jpeg_engine: bool,
     profile: bool,
+    async_send: bool,
+    drop_late_frames: bool,
+    dirty_mode: DirtyMode,
     dry_run: bool,
     ram_size_mb: Option<u8>,
     usb_timeout_ms: u64,
@@ -148,6 +183,14 @@ enum CaptureFormat {
     Nv12VideoRange,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirtyMode {
+    Off,
+    Log,
+    Bbox,
+    TileSend,
+}
+
 impl CaptureFormat {
     fn pixel_format(self) -> u32 {
         match self {
@@ -181,15 +224,319 @@ struct SenderState {
     options: Options,
     device: Option<T6Device>,
     scheduler: FrameScheduler,
+    jpeg_compressor: Option<FastJpegCompressor>,
+    rgb_scratch: Vec<u8>,
+    bgra_scratch: Vec<u8>,
+    dirty_bgra_scratch: Vec<u8>,
+    current_quality: i32,
     frame_interval: Duration,
     next_send_at: Instant,
     started_at: Instant,
+    last_report_at: Instant,
+    last_report_sent_frames: u32,
     sent_frames: u32,
     dropped_frames: u32,
+    throttled_frames: u32,
+    busy_frames: u32,
+    late_frames: u32,
+    current_display_fb_addr: Option<u32>,
     profile_stats: ProfileStats,
     first_frame_dumped: bool,
     sending: AtomicBool,
     stopped: AtomicBool,
+}
+
+unsafe impl Send for SenderState {}
+
+struct FastJpegCompressor {
+    handle: tj::tjhandle,
+    output: *mut u8,
+    output_len: usize,
+    output_capacity: usize,
+    configured_quality: i32,
+    subsamp: Subsamp,
+}
+
+unsafe impl Send for FastJpegCompressor {}
+
+impl FastJpegCompressor {
+    fn new(quality: i32, subsamp: Subsamp) -> Result<Self, Box<dyn Error>> {
+        let handle = unsafe { tj::tj3Init(tj::TJINIT_TJINIT_COMPRESS as i32) };
+        if handle.is_null() {
+            return Err("tj3Init failed".into());
+        }
+        let mut compressor = Self {
+            handle,
+            output: ptr::null_mut(),
+            output_len: 0,
+            output_capacity: 0,
+            configured_quality: quality,
+            subsamp,
+        };
+        compressor.set_param(tj::TJPARAM_TJPARAM_QUALITY, quality)?;
+        compressor.set_param(tj::TJPARAM_TJPARAM_SUBSAMP, subsamp as i32)?;
+        compressor.set_param(tj::TJPARAM_TJPARAM_OPTIMIZE, 0)?;
+        compressor.set_param(tj::TJPARAM_TJPARAM_FASTDCT, 1)?;
+        compressor.set_param(tj::TJPARAM_TJPARAM_NOREALLOC, 1)?;
+        Ok(compressor)
+    }
+
+    fn compress_bgra_ptr(
+        &mut self,
+        bgra: *const u8,
+        width: usize,
+        pitch: usize,
+        height: usize,
+        quality: i32,
+    ) -> Result<&[u8], Box<dyn Error>> {
+        self.compress_pixels(
+            bgra,
+            width,
+            pitch,
+            height,
+            tj::TJPF_TJPF_BGRA as i32,
+            quality,
+        )
+    }
+
+    fn compress_pixels(
+        &mut self,
+        pixels: *const u8,
+        width: usize,
+        pitch: usize,
+        height: usize,
+        pixel_format: i32,
+        quality: i32,
+    ) -> Result<&[u8], Box<dyn Error>> {
+        if self.configured_quality != quality {
+            self.set_param(tj::TJPARAM_TJPARAM_QUALITY, quality)?;
+            self.configured_quality = quality;
+        }
+        self.ensure_output_capacity(width, height)?;
+
+        let mut output_len = self.output_capacity as u64;
+        let result = unsafe {
+            tj::tj3Compress8(
+                self.handle,
+                pixels,
+                width.try_into()?,
+                pitch.try_into()?,
+                height.try_into()?,
+                pixel_format,
+                &mut self.output,
+                &mut output_len,
+            )
+        };
+        self.output_len = output_len.try_into()?;
+        if result != 0 {
+            return Err(self.error().into());
+        }
+        if self.output.is_null() {
+            return Err("tj3Compress8 returned null output".into());
+        }
+
+        Ok(unsafe { std::slice::from_raw_parts(self.output, self.output_len) })
+    }
+
+    fn set_param(&mut self, param: tj::TJPARAM, value: i32) -> Result<(), Box<dyn Error>> {
+        let result = unsafe { tj::tj3Set(self.handle, param as i32, value) };
+        if result != 0 {
+            return Err(self.error().into());
+        }
+        Ok(())
+    }
+
+    fn ensure_output_capacity(
+        &mut self,
+        width: usize,
+        height: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        let capacity_raw = unsafe {
+            tj::tj3JPEGBufSize(width.try_into()?, height.try_into()?, self.subsamp as i32)
+        };
+        if capacity_raw == 0 {
+            return Err(self.error().into());
+        }
+        let capacity: usize = capacity_raw.try_into()?;
+        if !self.output.is_null() && self.output_capacity >= capacity {
+            return Ok(());
+        }
+
+        if !self.output.is_null() {
+            unsafe { tj::tj3Free(self.output.cast()) };
+            self.output = ptr::null_mut();
+            self.output_capacity = 0;
+        }
+        let output = unsafe { tj::tj3Alloc(capacity_raw) };
+        if output.is_null() {
+            return Err("tj3Alloc failed".into());
+        }
+        self.output = output.cast();
+        self.output_capacity = capacity;
+        Ok(())
+    }
+
+    fn error(&self) -> String {
+        let error = unsafe { tj::tj3GetErrorStr(self.handle) };
+        if error.is_null() {
+            return "TurboJPEG error".to_string();
+        }
+        unsafe { CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+impl Drop for FastJpegCompressor {
+    fn drop(&mut self) {
+        unsafe {
+            tj::tj3Free(self.output.cast());
+            tj::tj3Destroy(self.handle);
+        }
+    }
+}
+
+struct AsyncShared {
+    latest_frame: Mutex<Option<OwnedCapturedFrame>>,
+    spare_frame: Mutex<Option<OwnedCapturedFrame>>,
+    frame_available: Condvar,
+    stopped: AtomicBool,
+    captured_frames: AtomicU32,
+    replaced_frames: AtomicU32,
+    skipped_frames: AtomicU32,
+    callback_copy_total_us: AtomicU64,
+    callback_copy_max_us: AtomicU64,
+}
+
+struct AsyncCallbackContext {
+    shared: Arc<AsyncShared>,
+}
+
+#[derive(Debug)]
+struct OwnedCapturedFrame {
+    pixel_format: u32,
+    plane0: Vec<u8>,
+    width: usize,
+    height: usize,
+    plane0_stride: usize,
+    plane1: Vec<u8>,
+    plane1_width: usize,
+    plane1_height: usize,
+    plane1_stride: usize,
+    dirty: DirtySummary,
+    dirty_rects: Vec<DirtyRect>,
+}
+
+impl OwnedCapturedFrame {
+    fn copy_from_callback(
+        &mut self,
+        pixel_format: u32,
+        plane0: *const u8,
+        plane0_byte_count: usize,
+        width: usize,
+        height: usize,
+        plane0_stride: usize,
+        plane1: *const u8,
+        plane1_byte_count: usize,
+        plane1_width: usize,
+        plane1_height: usize,
+        plane1_stride: usize,
+        dirty: DirtySummary,
+        dirty_rects: *const DirtyRect,
+        dirty_rects_len: usize,
+    ) {
+        self.pixel_format = pixel_format;
+        self.width = width;
+        self.height = height;
+        self.plane0_stride = plane0_stride;
+        self.plane1_width = plane1_width;
+        self.plane1_height = plane1_height;
+        self.plane1_stride = plane1_stride;
+        self.dirty = dirty;
+        if dirty_rects.is_null() || dirty_rects_len == 0 {
+            self.dirty_rects.clear();
+        } else {
+            self.dirty_rects.clear();
+            self.dirty_rects.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(dirty_rects, dirty_rects_len)
+            });
+        }
+
+        self.plane0.resize(plane0_byte_count, 0);
+        self.plane0
+            .copy_from_slice(unsafe { std::slice::from_raw_parts(plane0, plane0_byte_count) });
+
+        if plane1.is_null() || plane1_byte_count == 0 {
+            self.plane1.clear();
+        } else {
+            self.plane1.resize(plane1_byte_count, 0);
+            self.plane1
+                .copy_from_slice(unsafe { std::slice::from_raw_parts(plane1, plane1_byte_count) });
+        }
+    }
+
+    fn as_captured_frame(&self) -> CapturedFrame {
+        CapturedFrame {
+            pixel_format: self.pixel_format,
+            plane0: self.plane0.as_ptr(),
+            plane0_byte_count: self.plane0.len(),
+            width: self.width,
+            height: self.height,
+            plane0_stride: self.plane0_stride,
+            plane1: self.plane1.as_ptr(),
+            plane1_byte_count: self.plane1.len(),
+            plane1_width: self.plane1_width,
+            plane1_height: self.plane1_height,
+            plane1_stride: self.plane1_stride,
+            dirty: self.dirty,
+            dirty_rects: self.dirty_rects.as_ptr(),
+            dirty_rects_len: self.dirty_rects.len(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct DirtyRect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DirtySummary {
+    rect_count: usize,
+    min_x: usize,
+    min_y: usize,
+    width: usize,
+    height: usize,
+    area: u64,
+}
+
+impl DirtySummary {
+    fn bbox_area(self) -> u64 {
+        self.width
+            .saturating_mul(self.height)
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
+    fn area_ratio(self, frame_width: usize, frame_height: usize) -> f64 {
+        let total = frame_width.saturating_mul(frame_height);
+        if total == 0 {
+            return 0.0;
+        }
+        self.area as f64 / total as f64
+    }
+
+    fn bbox_ratio(self, frame_width: usize, frame_height: usize) -> f64 {
+        let total = frame_width.saturating_mul(frame_height);
+        if total == 0 {
+            return 0.0;
+        }
+        self.bbox_area() as f64 / total as f64
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -199,7 +546,29 @@ struct ProfileStats {
     encode: Duration,
     packet: Duration,
     usb: Duration,
+    usb_header: Duration,
+    usb_data: Duration,
     total: Duration,
+    max_convert: Duration,
+    max_encode: Duration,
+    max_packet: Duration,
+    max_usb: Duration,
+    max_usb_header: Duration,
+    max_usb_data: Duration,
+    max_total: Duration,
+    dirty_rects: u64,
+    dirty_area_ratio: f64,
+    dirty_bbox_ratio: f64,
+    dirty_full_frames: u32,
+    max_dirty_rects: usize,
+    max_dirty_area_ratio: f64,
+    max_dirty_bbox_ratio: f64,
+    dirty_probe_convert: Duration,
+    dirty_probe_encode: Duration,
+    max_dirty_probe_convert: Duration,
+    max_dirty_probe_encode: Duration,
+    dirty_probe_payload_bytes: u64,
+    max_dirty_probe_payload_bytes: usize,
 }
 
 impl ProfileStats {
@@ -209,7 +578,33 @@ impl ProfileStats {
         self.encode += sample.encode;
         self.packet += sample.packet;
         self.usb += sample.usb;
+        self.usb_header += sample.usb_header;
+        self.usb_data += sample.usb_data;
         self.total += sample.total;
+        self.max_convert = self.max_convert.max(sample.convert);
+        self.max_encode = self.max_encode.max(sample.encode);
+        self.max_packet = self.max_packet.max(sample.packet);
+        self.max_usb = self.max_usb.max(sample.usb);
+        self.max_usb_header = self.max_usb_header.max(sample.usb_header);
+        self.max_usb_data = self.max_usb_data.max(sample.usb_data);
+        self.max_total = self.max_total.max(sample.total);
+        self.dirty_rects = self.dirty_rects.saturating_add(sample.dirty_rects as u64);
+        self.dirty_area_ratio += sample.dirty_area_ratio;
+        self.dirty_bbox_ratio += sample.dirty_bbox_ratio;
+        self.dirty_full_frames += u32::from(sample.dirty_bbox_ratio >= 0.95);
+        self.max_dirty_rects = self.max_dirty_rects.max(sample.dirty_rects);
+        self.max_dirty_area_ratio = self.max_dirty_area_ratio.max(sample.dirty_area_ratio);
+        self.max_dirty_bbox_ratio = self.max_dirty_bbox_ratio.max(sample.dirty_bbox_ratio);
+        self.dirty_probe_convert += sample.dirty_probe_convert;
+        self.dirty_probe_encode += sample.dirty_probe_encode;
+        self.max_dirty_probe_convert = self.max_dirty_probe_convert.max(sample.dirty_probe_convert);
+        self.max_dirty_probe_encode = self.max_dirty_probe_encode.max(sample.dirty_probe_encode);
+        self.dirty_probe_payload_bytes = self
+            .dirty_probe_payload_bytes
+            .saturating_add(sample.dirty_probe_payload_bytes as u64);
+        self.max_dirty_probe_payload_bytes = self
+            .max_dirty_probe_payload_bytes
+            .max(sample.dirty_probe_payload_bytes);
     }
 
     fn take(&mut self) -> Self {
@@ -222,13 +617,35 @@ impl ProfileStats {
         }
 
         format!(
-            "profile frames={} avg_ms convert={:.2} encode={:.2} packet={:.2} usb={:.2} total={:.2}",
+            "profile frames={} avg_ms convert={:.2} encode={:.2} packet={:.2} usb={:.2} usb_h={:.2} usb_d={:.2} total={:.2} max_ms convert={:.2} encode={:.2} packet={:.2} usb={:.2} usb_h={:.2} usb_d={:.2} total={:.2} dirty avg_rects={:.1} avg_area={:.1}% avg_bbox={:.1}% max_rects={} max_area={:.1}% max_bbox={:.1}% fullish={} tile_probe avg_ms convert={:.2} encode={:.2} max_ms convert={:.2} encode={:.2} avg_payload={} max_payload={}",
             self.frames,
             avg_ms(self.convert, self.frames),
             avg_ms(self.encode, self.frames),
             avg_ms(self.packet, self.frames),
             avg_ms(self.usb, self.frames),
-            avg_ms(self.total, self.frames)
+            avg_ms(self.usb_header, self.frames),
+            avg_ms(self.usb_data, self.frames),
+            avg_ms(self.total, self.frames),
+            duration_ms(self.max_convert),
+            duration_ms(self.max_encode),
+            duration_ms(self.max_packet),
+            duration_ms(self.max_usb),
+            duration_ms(self.max_usb_header),
+            duration_ms(self.max_usb_data),
+            duration_ms(self.max_total),
+            self.dirty_rects as f64 / f64::from(self.frames),
+            self.dirty_area_ratio * 100.0 / f64::from(self.frames),
+            self.dirty_bbox_ratio * 100.0 / f64::from(self.frames),
+            self.max_dirty_rects,
+            self.max_dirty_area_ratio * 100.0,
+            self.max_dirty_bbox_ratio * 100.0,
+            self.dirty_full_frames,
+            avg_ms(self.dirty_probe_convert, self.frames),
+            avg_ms(self.dirty_probe_encode, self.frames),
+            duration_ms(self.max_dirty_probe_convert),
+            duration_ms(self.max_dirty_probe_encode),
+            self.dirty_probe_payload_bytes / u64::from(self.frames),
+            self.max_dirty_probe_payload_bytes
         )
     }
 }
@@ -239,11 +656,35 @@ struct ProfileSample {
     encode: Duration,
     packet: Duration,
     usb: Duration,
+    usb_header: Duration,
+    usb_data: Duration,
     total: Duration,
+    dirty_rects: usize,
+    dirty_area_ratio: f64,
+    dirty_bbox_ratio: f64,
+    dirty_probe_convert: Duration,
+    dirty_probe_encode: Duration,
+    dirty_probe_payload_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct UsbTiming {
+    header: Duration,
+    data: Duration,
+}
+
+impl UsbTiming {
+    fn total(self) -> Duration {
+        self.header + self.data
+    }
 }
 
 fn avg_ms(duration: Duration, frames: u32) -> f64 {
     duration.as_secs_f64() * 1000.0 / f64::from(frames)
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -272,14 +713,48 @@ fn main() -> Result<(), Box<dyn Error>> {
             .set_monitor_power(u16::from(options.display_index), true)?;
         println!("Sent monitor power on.");
     }
+    if options.reset_jpeg_engine {
+        device
+            .as_ref()
+            .ok_or("--reset-jpeg-engine cannot be used with --dry-run")?
+            .reset_jpeg_engine(u16::from(options.display_index))?;
+        println!("Sent JPEG engine reset.");
+    }
 
+    if options.async_send {
+        return run_async(options, device, ram_size_mb);
+    }
+
+    run_sync(options, device, ram_size_mb)
+}
+
+fn build_sender_state(
+    options: Options,
+    device: Option<T6Device>,
+    ram_size_mb: u8,
+) -> Result<SenderState, Box<dyn Error>> {
     let layout = VramLayout::two_port_1080p_secondary(ram_size_mb);
-    let state = Box::new(SenderState {
+    let jpeg_compressor = if options.transport == Transport::Jpeg {
+        Some(FastJpegCompressor::new(
+            options.quality,
+            options.subsamp.turbojpeg(),
+        )?)
+    } else {
+        None
+    };
+    let current_quality = options.quality;
+    Ok(SenderState {
         frame_interval: Duration::from_secs_f64(1.0 / f64::from(options.fps.max(1))),
         next_send_at: Instant::now(),
         started_at: Instant::now(),
+        last_report_at: Instant::now(),
+        last_report_sent_frames: 0,
         sent_frames: 0,
         dropped_frames: 0,
+        throttled_frames: 0,
+        busy_frames: 0,
+        late_frames: 0,
+        current_display_fb_addr: None,
         profile_stats: ProfileStats::default(),
         first_frame_dumped: false,
         sending: AtomicBool::new(false),
@@ -287,7 +762,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         options,
         device,
         scheduler: FrameScheduler::new(layout),
-    });
+        jpeg_compressor,
+        rgb_scratch: Vec::new(),
+        bgra_scratch: Vec::new(),
+        dirty_bgra_scratch: Vec::new(),
+        current_quality,
+    })
+}
+
+fn run_sync(
+    options: Options,
+    device: Option<T6Device>,
+    ram_size_mb: u8,
+) -> Result<(), Box<dyn Error>> {
+    let state = Box::new(build_sender_state(options, device, ram_size_mb)?);
     let state_ptr = Box::into_raw(state);
 
     let display_id = unsafe {
@@ -346,12 +834,122 @@ fn main() -> Result<(), Box<dyn Error>> {
         t6_vd_stop();
         let state = Box::from_raw(state_ptr);
         println!(
-            "Sent {} frames, dropped {} frames in {:.3}s",
+            "Sent {} frames, dropped {} frames throttled={} busy={} late={} in {:.3}s",
             state.sent_frames,
             state.dropped_frames,
+            state.throttled_frames,
+            state.busy_frames,
+            state.late_frames,
             state.started_at.elapsed().as_secs_f64()
         );
     }
+
+    Ok(())
+}
+
+fn run_async(
+    options: Options,
+    device: Option<T6Device>,
+    ram_size_mb: u8,
+) -> Result<(), Box<dyn Error>> {
+    if options.dump_first_frame.is_some() {
+        return Err("--dump-first-frame is not supported with --async-send yet".into());
+    }
+
+    let shared = Arc::new(AsyncShared {
+        latest_frame: Mutex::new(None),
+        spare_frame: Mutex::new(None),
+        frame_available: Condvar::new(),
+        stopped: AtomicBool::new(false),
+        captured_frames: AtomicU32::new(0),
+        replaced_frames: AtomicU32::new(0),
+        skipped_frames: AtomicU32::new(0),
+        callback_copy_total_us: AtomicU64::new(0),
+        callback_copy_max_us: AtomicU64::new(0),
+    });
+    let sender_shared = Arc::clone(&shared);
+    let sender_state = build_sender_state(options.clone(), device, ram_size_mb)?;
+    let sender = thread::spawn(move || async_sender_loop(sender_state, sender_shared));
+
+    let context = Box::new(AsyncCallbackContext {
+        shared: Arc::clone(&shared),
+    });
+    let context_ptr = Box::into_raw(context);
+
+    let display_id = unsafe {
+        t6_vd_start(
+            usize::from(options.width),
+            usize::from(options.height),
+            f64::from(options.fps),
+            options.capture_format.pixel_format(),
+            async_frame_callback,
+            context_ptr.cast(),
+        )
+    };
+    if display_id == 0 {
+        shared.stopped.store(true, Ordering::Relaxed);
+        shared.frame_available.notify_all();
+        let _context = unsafe { Box::from_raw(context_ptr) };
+        return Err(format!(
+            "failed to create virtual display or display stream: {}",
+            unsafe { last_virtual_display_error() }
+        )
+        .into());
+    }
+
+    let (output_width, output_height) = options.rotate.output_size(options.width, options.height);
+    println!(
+        "Started virtual display id={} capture={}x{} output={}x{} rotate={:?} fps={} transport={:?} capture_format={:?} quality={} subsamp={:?} async_send=true dry_run={}",
+        display_id,
+        options.width,
+        options.height,
+        output_width,
+        output_height,
+        options.rotate,
+        options.fps,
+        options.transport,
+        options.capture_format,
+        options.quality,
+        options.subsamp,
+        options.dry_run
+    );
+    println!("Stop with Ctrl-C, or use --frames N for a bounded run.");
+
+    while !shared.stopped.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    unsafe {
+        t6_vd_stop();
+    }
+    shared.frame_available.notify_all();
+    let _context = unsafe { Box::from_raw(context_ptr) };
+
+    let state = sender
+        .join()
+        .map_err(|_| "async sender thread panicked")?
+        .map_err(|error| format!("async sender thread failed: {error}"))?;
+    let captured_frames = shared.captured_frames.load(Ordering::Relaxed);
+    let callback_copy_total_us = shared.callback_copy_total_us.load(Ordering::Relaxed);
+    let callback_copy_avg_ms = if captured_frames > 0 {
+        callback_copy_total_us as f64 / f64::from(captured_frames) / 1000.0
+    } else {
+        0.0
+    };
+    println!(
+        "Sent {} frames, captured {} frames, replaced {} frames, skipped {} frames, dropped {} frames throttled={} busy={} late={} callback_copy_avg_ms={:.2} callback_copy_max_ms={:.2} in {:.3}s",
+        state.sent_frames,
+        captured_frames,
+        shared.replaced_frames.load(Ordering::Relaxed),
+        shared.skipped_frames.load(Ordering::Relaxed),
+        state.dropped_frames,
+        state.throttled_frames,
+        state.busy_frames,
+        state.late_frames,
+        callback_copy_avg_ms,
+        shared.callback_copy_max_us.load(Ordering::Relaxed) as f64 / 1000.0,
+        state.started_at.elapsed().as_secs_f64()
+    );
 
     Ok(())
 }
@@ -379,6 +977,14 @@ extern "C" fn frame_callback(
     plane1_width: usize,
     plane1_height: usize,
     plane1_stride: usize,
+    dirty_rect_count: usize,
+    dirty_min_x: usize,
+    dirty_min_y: usize,
+    dirty_width: usize,
+    dirty_height: usize,
+    dirty_area: u64,
+    dirty_rects: *const DirtyRect,
+    dirty_rects_len: usize,
     user_data: *mut c_void,
 ) {
     if plane0.is_null() || user_data.is_null() {
@@ -386,13 +992,19 @@ extern "C" fn frame_callback(
     }
 
     let state = unsafe { &mut *(user_data.cast::<SenderState>()) };
-    if state.stopped.load(Ordering::Relaxed) || Instant::now() < state.next_send_at {
+    if state.stopped.load(Ordering::Relaxed) {
+        return;
+    }
+
+    if Instant::now() < state.next_send_at {
         state.dropped_frames = state.dropped_frames.saturating_add(1);
+        state.throttled_frames = state.throttled_frames.saturating_add(1);
         return;
     }
 
     if state.sending.swap(true, Ordering::Acquire) {
         state.dropped_frames = state.dropped_frames.saturating_add(1);
+        state.busy_frames = state.busy_frames.saturating_add(1);
         return;
     }
 
@@ -418,12 +1030,209 @@ extern "C" fn frame_callback(
             plane1_width,
             plane1_height,
             plane1_stride,
+            dirty: DirtySummary {
+                rect_count: dirty_rect_count,
+                min_x: dirty_min_x,
+                min_y: dirty_min_y,
+                width: dirty_width,
+                height: dirty_height,
+                area: dirty_area,
+            },
+            dirty_rects,
+            dirty_rects_len,
         },
     );
     state.sending.store(false, Ordering::Release);
     if let Err(error) = result {
         eprintln!("virtual display frame error: {error}");
         state.stopped.store(true, Ordering::Relaxed);
+    }
+}
+
+extern "C" fn async_frame_callback(
+    pixel_format: u32,
+    plane0: *const u8,
+    plane0_byte_count: usize,
+    width: usize,
+    height: usize,
+    plane0_stride: usize,
+    plane1: *const u8,
+    plane1_byte_count: usize,
+    plane1_width: usize,
+    plane1_height: usize,
+    plane1_stride: usize,
+    dirty_rect_count: usize,
+    dirty_min_x: usize,
+    dirty_min_y: usize,
+    dirty_width: usize,
+    dirty_height: usize,
+    dirty_area: u64,
+    dirty_rects: *const DirtyRect,
+    dirty_rects_len: usize,
+    user_data: *mut c_void,
+) {
+    if plane0.is_null() || user_data.is_null() {
+        return;
+    }
+
+    let context = unsafe { &*(user_data.cast::<AsyncCallbackContext>()) };
+    if context.shared.stopped.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let latest = match context.shared.latest_frame.try_lock() {
+        Ok(latest) => latest,
+        Err(_) => {
+            context
+                .shared
+                .skipped_frames
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    if latest.is_some() {
+        context
+            .shared
+            .skipped_frames
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    drop(latest);
+
+    let copy_started = Instant::now();
+    let mut frame = context
+        .shared
+        .spare_frame
+        .try_lock()
+        .ok()
+        .and_then(|mut spare| spare.take())
+        .unwrap_or_else(|| OwnedCapturedFrame {
+            pixel_format,
+            plane0: Vec::with_capacity(plane0_byte_count),
+            width,
+            height,
+            plane0_stride,
+            plane1: Vec::with_capacity(plane1_byte_count),
+            plane1_width,
+            plane1_height,
+            plane1_stride,
+            dirty: DirtySummary::default(),
+            dirty_rects: Vec::new(),
+        });
+    let dirty = DirtySummary {
+        rect_count: dirty_rect_count,
+        min_x: dirty_min_x,
+        min_y: dirty_min_y,
+        width: dirty_width,
+        height: dirty_height,
+        area: dirty_area,
+    };
+    frame.copy_from_callback(
+        pixel_format,
+        plane0,
+        plane0_byte_count,
+        width,
+        height,
+        plane0_stride,
+        plane1,
+        plane1_byte_count,
+        plane1_width,
+        plane1_height,
+        plane1_stride,
+        dirty,
+        dirty_rects,
+        dirty_rects_len,
+    );
+    let copy_us = copy_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    context
+        .shared
+        .callback_copy_total_us
+        .fetch_add(copy_us, Ordering::Relaxed);
+    update_atomic_max(&context.shared.callback_copy_max_us, copy_us);
+
+    let mut latest = context
+        .shared
+        .latest_frame
+        .lock()
+        .expect("latest frame mutex");
+    if latest.is_some() {
+        context
+            .shared
+            .skipped_frames
+            .fetch_add(1, Ordering::Relaxed);
+        drop(latest);
+        recycle_async_frame(&context.shared, frame);
+        return;
+    }
+    *latest = Some(frame);
+    context
+        .shared
+        .captured_frames
+        .fetch_add(1, Ordering::Relaxed);
+    context.shared.frame_available.notify_one();
+}
+
+fn async_sender_loop(
+    mut state: SenderState,
+    shared: Arc<AsyncShared>,
+) -> Result<SenderState, String> {
+    loop {
+        let frame = {
+            let mut latest = shared.latest_frame.lock().expect("latest frame mutex");
+            while latest.is_none() && !shared.stopped.load(Ordering::Relaxed) {
+                latest = shared
+                    .frame_available
+                    .wait(latest)
+                    .expect("latest frame mutex");
+            }
+            if shared.stopped.load(Ordering::Relaxed) && latest.is_none() {
+                break;
+            }
+            latest.take()
+        };
+
+        let Some(frame) = frame else {
+            continue;
+        };
+        if let Some(frame_limit) = state.options.frames {
+            if state.sent_frames >= frame_limit {
+                state.stopped.store(true, Ordering::Relaxed);
+                shared.stopped.store(true, Ordering::Relaxed);
+                recycle_async_frame(&shared, frame);
+                break;
+            }
+        }
+
+        if let Err(error) = send_frame(&mut state, frame.as_captured_frame()) {
+            state.stopped.store(true, Ordering::Relaxed);
+            shared.stopped.store(true, Ordering::Relaxed);
+            return Err(error.to_string());
+        }
+        recycle_async_frame(&shared, frame);
+        if state.stopped.load(Ordering::Relaxed) {
+            shared.stopped.store(true, Ordering::Relaxed);
+            break;
+        }
+    }
+
+    Ok(state)
+}
+
+fn recycle_async_frame(shared: &AsyncShared, frame: OwnedCapturedFrame) {
+    if let Ok(mut spare) = shared.spare_frame.try_lock() {
+        if spare.is_none() {
+            *spare = Some(frame);
+        }
+    }
+}
+
+fn update_atomic_max(value: &AtomicU64, sample: u64) {
+    let mut current = value.load(Ordering::Relaxed);
+    while sample > current {
+        match value.compare_exchange_weak(current, sample, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
     }
 }
 
@@ -440,12 +1249,15 @@ struct CapturedFrame {
     plane1_width: usize,
     plane1_height: usize,
     plane1_stride: usize,
+    dirty: DirtySummary,
+    dirty_rects: *const DirtyRect,
+    dirty_rects_len: usize,
 }
 
 fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<dyn Error>> {
     let frame_started = Instant::now();
     let mut profile = ProfileSample::default();
-    let options = &state.options;
+    let options = state.options.clone();
     let expected_width = usize::from(options.width);
     let expected_height = usize::from(options.height);
     if frame.width != expected_width || frame.height != expected_height {
@@ -460,6 +1272,17 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             || frame.plane0_byte_count < frame.plane0_stride * expected_height)
     {
         return Err("invalid BGRA frame stride or byte count".into());
+    }
+    if options.dirty_mode != DirtyMode::Off {
+        profile.dirty_rects = frame.dirty.rect_count;
+        profile.dirty_area_ratio = frame
+            .dirty
+            .area_ratio(expected_width, expected_height)
+            .min(1.0);
+        profile.dirty_bbox_ratio = frame
+            .dirty
+            .bbox_ratio(expected_width, expected_height)
+            .min(1.0);
     }
 
     let (output_width, output_height) = options.rotate.output_size(options.width, options.height);
@@ -481,54 +1304,25 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
     let (payload_bytes, chunks, cmd_addr, fb_addr, reset_jpeg) = match options.transport {
         Transport::Jpeg => {
             ensure_bgra_capture(frame)?;
-            let convert_started = Instant::now();
-            let rgb = copy_bgra_to_rgb(
-                frame.plane0,
+            if options.dirty_mode == DirtyMode::TileSend {
+                run_dirty_tile_jpeg_probe(
+                    state,
+                    frame,
+                    expected_width,
+                    expected_height,
+                    &mut profile,
+                )?;
+            }
+            send_full_jpeg_frame(
+                state,
+                frame,
                 expected_width,
                 expected_height,
-                frame.plane0_stride,
-                options.rotate,
-            );
-            profile.convert = convert_started.elapsed();
-            let encode_started = Instant::now();
-            let jpeg =
-                turbojpeg::compress_image(&rgb, options.quality, options.subsamp.turbojpeg())?;
-            profile.encode = encode_started.elapsed();
-            let packet_started = Instant::now();
-            let addresses = state.scheduler.next_jpeg_frame(jpeg.len());
-            let flags = if addresses.reset_jpeg {
-                VIDEO_FLAG_RESET_JPEG
-            } else {
-                0
-            };
-            let packet = JpegFramePacket::new_with_target_format(
-                options.display_index,
-                &jpeg,
                 output_width,
                 output_height,
-                addresses.cmd_addr,
-                addresses.fb_addr,
-                options.jpeg_target.video_color(),
-                flags,
-            );
-            let chunks = packet.bulk_chunks(options.max_packet_size).len();
-            profile.packet = packet_started.elapsed();
-            if let Some(device) = &state.device {
-                let usb_started = Instant::now();
-                send_chunks_with_context(
-                    device,
-                    &packet.bulk_chunks(options.max_packet_size),
-                    "jpeg",
-                )?;
-                profile.usb = usb_started.elapsed();
-            }
-            (
-                jpeg.len(),
-                chunks,
-                addresses.cmd_addr,
-                addresses.fb_addr,
-                addresses.reset_jpeg,
-            )
+                frame_started,
+                &mut profile,
+            )?
         }
         Transport::Nv12 => {
             let nv12 = if frame.pixel_format == PIXEL_FORMAT_420F
@@ -576,17 +1370,18 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
         }
         Transport::Rgb24 => {
             ensure_bgra_capture(frame)?;
-            let rgb = copy_bgra_to_rgb(
+            copy_bgra_to_rgb_bytes(
                 frame.plane0,
                 expected_width,
                 expected_height,
                 frame.plane0_stride,
                 options.rotate,
+                &mut state.rgb_scratch,
             );
-            let addresses = state.scheduler.next_jpeg_frame(rgb.as_raw().len());
+            let addresses = state.scheduler.next_jpeg_frame(state.rgb_scratch.len());
             let packet = RawFramePacket::rgb24(
                 options.display_index,
-                rgb.as_raw(),
+                &state.rgb_scratch,
                 output_width,
                 output_height,
                 addresses.fb_addr,
@@ -688,25 +1483,56 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             )
         }
     };
+    if payload_bytes == 0 && chunks == 0 {
+        return Ok(());
+    }
 
     state.sent_frames += 1;
-    state.next_send_at += state.frame_interval;
     profile.total = frame_started.elapsed();
+    adapt_jpeg_quality(state, profile.total);
+    resync_next_send_at(state, Instant::now());
     if options.profile {
         state.profile_stats.push(profile);
     }
 
     if state.sent_frames == 1 || state.sent_frames % 60 == 0 {
+        let now = Instant::now();
+        let sent_delta = state
+            .sent_frames
+            .saturating_sub(state.last_report_sent_frames);
+        let report_elapsed = now.duration_since(state.last_report_at).as_secs_f64();
+        let sent_fps = if report_elapsed > 0.0 {
+            f64::from(sent_delta) / report_elapsed
+        } else {
+            0.0
+        };
         println!(
-            "frame={} dropped={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} reset={} chunks={}",
+            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}",
             state.sent_frames,
+            sent_fps,
             state.dropped_frames,
+            state.throttled_frames,
+            state.busy_frames,
+            state.late_frames,
+            state.current_quality,
             payload_bytes,
             cmd_addr,
             fb_addr,
             reset_jpeg,
-            chunks
+            chunks,
+            frame.dirty.rect_count,
+            profile.dirty_area_ratio * 100.0,
+            frame.dirty.width,
+            frame.dirty.height,
+            frame.dirty.min_x,
+            frame.dirty.min_y,
+            profile.dirty_bbox_ratio * 100.0,
+            profile.dirty_probe_payload_bytes,
+            duration_ms(profile.dirty_probe_convert),
+            duration_ms(profile.dirty_probe_encode)
         );
+        state.last_report_at = now;
+        state.last_report_sent_frames = state.sent_frames;
         if options.profile {
             println!("{}", state.profile_stats.take().summary());
         }
@@ -723,12 +1549,283 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
     Ok(())
 }
 
+fn send_full_jpeg_frame(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    expected_width: usize,
+    expected_height: usize,
+    output_width: u16,
+    output_height: u16,
+    frame_started: Instant,
+    profile: &mut ProfileSample,
+) -> Result<(usize, usize, u32, u32, bool), Box<dyn Error>> {
+    let options = state.options.clone();
+    let convert_started = Instant::now();
+    let (jpeg_pixels, jpeg_pitch) = if options.rotate == Rotation::Deg0 {
+        (frame.plane0, frame.plane0_stride)
+    } else {
+        let (rotated_width, rotated_height, rotated_stride) = rotate_bgra_with_vimage(
+            frame.plane0,
+            expected_width,
+            expected_height,
+            frame.plane0_stride,
+            options.rotate,
+            &mut state.bgra_scratch,
+        )?;
+        debug_assert_eq!(rotated_width, usize::from(output_width));
+        debug_assert_eq!(rotated_height, usize::from(output_height));
+        (state.bgra_scratch.as_ptr(), rotated_stride)
+    };
+    profile.convert = convert_started.elapsed();
+    let frame_interval = state.frame_interval;
+    if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
+        drop_late_frame(state, *profile, frame_started);
+        return Ok((0, 0, 0, 0, false));
+    }
+    let encode_started = Instant::now();
+    let compressor = state
+        .jpeg_compressor
+        .as_mut()
+        .ok_or("JPEG compressor is not initialized")?;
+    let jpeg = compressor.compress_bgra_ptr(
+        jpeg_pixels,
+        usize::from(output_width),
+        jpeg_pitch,
+        usize::from(output_height),
+        state.current_quality,
+    )?;
+    let jpeg_len = jpeg.len();
+    profile.encode = encode_started.elapsed();
+    if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
+        drop_late_frame(state, *profile, frame_started);
+        return Ok((0, 0, 0, 0, false));
+    }
+    let packet_started = Instant::now();
+    let addresses = state.scheduler.next_jpeg_frame(jpeg_len);
+    state.current_display_fb_addr = Some(addresses.fb_addr);
+    let flags = if addresses.reset_jpeg {
+        VIDEO_FLAG_RESET_JPEG
+    } else {
+        0
+    };
+    let packet = JpegFramePacket::new_with_target_format(
+        options.display_index,
+        jpeg,
+        output_width,
+        output_height,
+        addresses.cmd_addr,
+        addresses.fb_addr,
+        options.jpeg_target.video_color(),
+        flags,
+    );
+    let chunks = packet.bulk_chunks(options.max_packet_size).len();
+    profile.packet = packet_started.elapsed();
+    if let Some(device) = &state.device {
+        let usb_timing =
+            send_chunks_with_context(device, &packet.bulk_chunks(options.max_packet_size), "jpeg")?;
+        profile.usb_header = usb_timing.header;
+        profile.usb_data = usb_timing.data;
+        profile.usb = usb_timing.total();
+    }
+    if options.dirty_mode == DirtyMode::Bbox {
+        run_dirty_tile_jpeg_probe(state, frame, expected_width, expected_height, profile)?;
+    }
+    Ok((
+        jpeg_len,
+        chunks,
+        addresses.cmd_addr,
+        addresses.fb_addr,
+        addresses.reset_jpeg,
+    ))
+}
+
+fn run_dirty_tile_jpeg_probe(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    frame_width: usize,
+    frame_height: usize,
+    profile: &mut ProfileSample,
+) -> Result<(), Box<dyn Error>> {
+    if frame.pixel_format != PIXEL_FORMAT_BGRA || frame.dirty.rect_count == 0 {
+        return Ok(());
+    }
+
+    let dirty_rects = captured_dirty_rects(frame);
+    if dirty_rects.is_empty() {
+        if let Some((x, y, width, height)) =
+            clamped_dirty_bbox(frame.dirty, frame_width, frame_height)
+        {
+            encode_dirty_tile_probe(state, frame, x, y, width, height, profile)?;
+        }
+        return Ok(());
+    }
+
+    for rect in dirty_rects {
+        let Some((x, y, width, height)) = clamped_dirty_rect(*rect, frame_width, frame_height)
+        else {
+            continue;
+        };
+        encode_dirty_tile_probe(state, frame, x, y, width, height, profile)?;
+    }
+
+    Ok(())
+}
+
+fn encode_dirty_tile_probe(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    profile: &mut ProfileSample,
+) -> Result<(), Box<dyn Error>> {
+    let convert_started = Instant::now();
+    crop_bgra_bbox(
+        frame.plane0,
+        frame.plane0_stride,
+        x,
+        y,
+        width,
+        height,
+        &mut state.dirty_bgra_scratch,
+    );
+    profile.dirty_probe_convert += convert_started.elapsed();
+    let encode_started = Instant::now();
+    let compressor = state
+        .jpeg_compressor
+        .as_mut()
+        .ok_or("JPEG compressor is not initialized")?;
+    let jpeg = compressor.compress_bgra_ptr(
+        state.dirty_bgra_scratch.as_ptr(),
+        width,
+        width * 4,
+        height,
+        state.current_quality,
+    )?;
+    profile.dirty_probe_payload_bytes =
+        profile.dirty_probe_payload_bytes.saturating_add(jpeg.len());
+    profile.dirty_probe_encode += encode_started.elapsed();
+
+    Ok(())
+}
+
+fn captured_dirty_rects(frame: CapturedFrame) -> &'static [DirtyRect] {
+    if frame.dirty_rects.is_null() || frame.dirty_rects_len == 0 {
+        return &[];
+    }
+    unsafe { std::slice::from_raw_parts(frame.dirty_rects, frame.dirty_rects_len) }
+}
+
+fn clamped_dirty_bbox(
+    dirty: DirtySummary,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    if dirty.width == 0 || dirty.height == 0 || frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+    let x = dirty.min_x.min(frame_width);
+    let y = dirty.min_y.min(frame_height);
+    let max_x = dirty.min_x.saturating_add(dirty.width).min(frame_width);
+    let max_y = dirty.min_y.saturating_add(dirty.height).min(frame_height);
+    if max_x <= x || max_y <= y {
+        return None;
+    }
+    Some((x, y, max_x - x, max_y - y))
+}
+
+fn clamped_dirty_rect(
+    rect: DirtyRect,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    if rect.width == 0 || rect.height == 0 || frame_width == 0 || frame_height == 0 {
+        return None;
+    }
+    let x = rect.x.min(frame_width);
+    let y = rect.y.min(frame_height);
+    let max_x = rect.x.saturating_add(rect.width).min(frame_width);
+    let max_y = rect.y.saturating_add(rect.height).min(frame_height);
+    if max_x <= x || max_y <= y {
+        return None;
+    }
+    Some((x, y, max_x - x, max_y - y))
+}
+
+fn crop_bgra_bbox(
+    bgra: *const u8,
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    out: &mut Vec<u8>,
+) {
+    let row_bytes = width * 4;
+    out.resize(row_bytes * height, 0);
+    for row in 0..height {
+        let src =
+            unsafe { std::slice::from_raw_parts(bgra.add((y + row) * stride + x * 4), row_bytes) };
+        let dst = &mut out[row * row_bytes..(row + 1) * row_bytes];
+        dst.copy_from_slice(src);
+    }
+}
+
+fn drop_late_frame(state: &mut SenderState, mut profile: ProfileSample, frame_started: Instant) {
+    state.dropped_frames = state.dropped_frames.saturating_add(1);
+    state.late_frames = state.late_frames.saturating_add(1);
+    profile.total = frame_started.elapsed();
+    adapt_jpeg_quality(state, profile.total);
+    resync_next_send_at(state, Instant::now());
+    if state.options.profile {
+        state.profile_stats.push(profile);
+    }
+}
+
+fn resync_next_send_at(state: &mut SenderState, now: Instant) {
+    let next = state.next_send_at + state.frame_interval;
+    state.next_send_at = if now > next + state.frame_interval {
+        now
+    } else {
+        next
+    };
+}
+
+fn adapt_jpeg_quality(state: &mut SenderState, total: Duration) {
+    let options = &state.options;
+    if options.transport != Transport::Jpeg || !options.adaptive_quality {
+        return;
+    }
+
+    let budget = state.frame_interval;
+    let next_quality = if total > budget * 8 {
+        state.current_quality - 15
+    } else if total > budget * 4 {
+        state.current_quality - 10
+    } else if total > budget * 2 {
+        state.current_quality - 5
+    } else if total > budget + budget / 2 {
+        state.current_quality - 3
+    } else if total > budget {
+        state.current_quality - 1
+    } else if total < budget * 3 / 4 {
+        state.current_quality + 1
+    } else {
+        state.current_quality
+    };
+
+    state.current_quality = next_quality.clamp(options.min_quality, options.quality);
+}
+
 fn send_chunks_with_context(
     device: &T6Device,
     chunks: &[BulkTransferChunk<'_>],
     label: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<UsbTiming, Box<dyn Error>> {
+    let mut timing = UsbTiming::default();
     for (chunk_index, chunk) in chunks.iter().enumerate() {
+        let header_started = Instant::now();
         device
             .write_display_bulk(&chunk.header.to_bytes())
             .map_err(|error| {
@@ -740,6 +1837,8 @@ fn send_chunks_with_context(
                     chunk.header.packet_size
                 )
             })?;
+        timing.header += header_started.elapsed();
+        let data_started = Instant::now();
         device.write_display_bulk(chunk.data).map_err(|error| {
             format!(
                 "{label} bulk data error at chunk {}/{} offset={} size={}: {error}",
@@ -749,9 +1848,10 @@ fn send_chunks_with_context(
                 chunk.header.packet_size
             )
         })?;
+        timing.data += data_started.elapsed();
     }
 
-    Ok(())
+    Ok(timing)
 }
 
 fn send_raw_packet(
@@ -760,12 +1860,13 @@ fn send_raw_packet(
     max_packet_size: u32,
     mode: RawBulkMode,
     label: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<UsbTiming, Box<dyn Error>> {
     match mode {
         RawBulkMode::Fragmented => {
             send_chunks_with_context(device, &packet.bulk_chunks(max_packet_size), label)
         }
         RawBulkMode::Single => {
+            let mut timing = UsbTiming::default();
             let header = BulkDmaHeader::display(
                 packet.payload.len() as u32,
                 packet.payload_address,
@@ -773,6 +1874,7 @@ fn send_raw_packet(
                 0,
                 false,
             );
+            let header_started = Instant::now();
             device
                 .write_display_bulk(&header.to_bytes())
                 .map_err(|error| {
@@ -782,6 +1884,8 @@ fn send_raw_packet(
                         packet.payload_address
                     )
                 })?;
+            timing.header = header_started.elapsed();
+            let data_started = Instant::now();
             device
                 .write_display_bulk(&packet.payload)
                 .map_err(|error| {
@@ -791,8 +1895,9 @@ fn send_raw_packet(
                         packet.payload_address
                     )
                 })?;
+            timing.data = data_started.elapsed();
 
-            Ok(())
+            Ok(timing)
         }
     }
 }
@@ -1191,21 +2296,130 @@ fn copy_bgra_to_rgb(
         Rotation::Deg0 | Rotation::Deg180 => (width, height),
         Rotation::Deg90 | Rotation::Deg270 => (height, width),
     };
-    let mut rgb = Vec::with_capacity(width * height * 3);
-
-    for out_y in 0..output_height {
-        for out_x in 0..output_width {
-            let (src_x, src_y) = source_coordinate(out_x, out_y, width, height, rotation);
-            let offset = src_y * stride + src_x * 4;
-            let pixel = unsafe { std::slice::from_raw_parts(bgra.add(offset), 4) };
-            rgb.push(pixel[2]);
-            rgb.push(pixel[1]);
-            rgb.push(pixel[0]);
-        }
-    }
+    let mut rgb = Vec::new();
+    copy_bgra_to_rgb_bytes(bgra, width, height, stride, rotation, &mut rgb);
 
     RgbImage::from_raw(output_width as u32, output_height as u32, rgb)
         .expect("RGB buffer has expected size")
+}
+
+fn copy_bgra_to_rgb_bytes(
+    bgra: *const u8,
+    width: usize,
+    height: usize,
+    stride: usize,
+    rotation: Rotation,
+    rgb: &mut Vec<u8>,
+) {
+    let (output_width, _) = match rotation {
+        Rotation::Deg0 | Rotation::Deg180 => (width, height),
+        Rotation::Deg90 | Rotation::Deg270 => (height, width),
+    };
+    rgb.resize(width * height * 3, 0);
+
+    match rotation {
+        Rotation::Deg0 => {
+            for y in 0..height {
+                let row = unsafe { std::slice::from_raw_parts(bgra.add(y * stride), width * 4) };
+                let out_row = &mut rgb[y * width * 3..(y + 1) * width * 3];
+                for x in 0..width {
+                    let src = x * 4;
+                    let dst = x * 3;
+                    out_row[dst] = row[src + 2];
+                    out_row[dst + 1] = row[src + 1];
+                    out_row[dst + 2] = row[src];
+                }
+            }
+        }
+        Rotation::Deg90 => {
+            for out_y in 0..width {
+                let out_row = &mut rgb[out_y * output_width * 3..(out_y + 1) * output_width * 3];
+                for out_x in 0..height {
+                    let src_y = height - 1 - out_x;
+                    let src = out_y * 4;
+                    let pixel =
+                        unsafe { std::slice::from_raw_parts(bgra.add(src_y * stride + src), 4) };
+                    let dst = out_x * 3;
+                    out_row[dst] = pixel[2];
+                    out_row[dst + 1] = pixel[1];
+                    out_row[dst + 2] = pixel[0];
+                }
+            }
+        }
+        Rotation::Deg180 => {
+            for src_y in 0..height {
+                let row =
+                    unsafe { std::slice::from_raw_parts(bgra.add(src_y * stride), width * 4) };
+                let out_y = height - 1 - src_y;
+                for src_x in 0..width {
+                    let out_x = width - 1 - src_x;
+                    let src = src_x * 4;
+                    let dst = (out_y * output_width + out_x) * 3;
+                    rgb[dst] = row[src + 2];
+                    rgb[dst + 1] = row[src + 1];
+                    rgb[dst + 2] = row[src];
+                }
+            }
+        }
+        Rotation::Deg270 => {
+            for out_y in 0..width {
+                let out_row = &mut rgb[out_y * output_width * 3..(out_y + 1) * output_width * 3];
+                let src_x = width - 1 - out_y;
+                for out_x in 0..height {
+                    let pixel = unsafe {
+                        std::slice::from_raw_parts(bgra.add(out_x * stride + src_x * 4), 4)
+                    };
+                    let dst = out_x * 3;
+                    out_row[dst] = pixel[2];
+                    out_row[dst + 1] = pixel[1];
+                    out_row[dst + 2] = pixel[0];
+                }
+            }
+        }
+    }
+}
+
+fn rotate_bgra_with_vimage(
+    bgra: *const u8,
+    width: usize,
+    height: usize,
+    stride: usize,
+    rotation: Rotation,
+    out: &mut Vec<u8>,
+) -> Result<(usize, usize, usize), Box<dyn Error>> {
+    let (output_width, output_height) = match rotation {
+        Rotation::Deg0 | Rotation::Deg180 => (width, height),
+        Rotation::Deg90 | Rotation::Deg270 => (height, width),
+    };
+    let output_stride = output_width * 4;
+    out.resize(output_stride * output_height, 0);
+
+    let rotation_constant = match rotation {
+        Rotation::Deg0 => 0,
+        Rotation::Deg90 => 3,
+        Rotation::Deg180 => 2,
+        Rotation::Deg270 => 1,
+    };
+    let src = VImageBuffer {
+        data: bgra.cast_mut().cast(),
+        height,
+        width,
+        row_bytes: stride,
+    };
+    let dest = VImageBuffer {
+        data: out.as_mut_ptr().cast(),
+        height: output_height,
+        width: output_width,
+        row_bytes: output_stride,
+    };
+    let back_color = [0u8, 0, 0, 255];
+    let status =
+        unsafe { vImageRotate90_ARGB8888(&src, &dest, rotation_constant, back_color.as_ptr(), 0) };
+    if status != 0 {
+        return Err(format!("vImageRotate90_ARGB8888 failed: {status}").into());
+    }
+
+    Ok((output_width, output_height, output_stride))
 }
 
 fn source_coordinate(
@@ -1231,6 +2445,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut fps = 60;
     let mut frames = None;
     let mut quality = 95;
+    let mut adaptive_quality = false;
+    let mut min_quality = 85;
     let mut subsamp = JpegSubsampling::Yuv420;
     let mut jpeg_target = JpegTarget::Nv12;
     let mut chroma_mode = ChromaMode::Average;
@@ -1241,7 +2457,11 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut raw_bulk_mode = RawBulkMode::Fragmented;
     let mut ready = false;
     let mut power_on = false;
+    let mut reset_jpeg_engine = false;
     let mut profile = false;
+    let mut async_send = false;
+    let mut drop_late_frames = false;
+    let mut dirty_mode = DirtyMode::Log;
     let mut dry_run = false;
     let mut ram_size_mb = None;
     let mut usb_timeout_ms = 3000;
@@ -1260,6 +2480,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--fps" => fps = next_value(&mut args, "--fps")?.parse()?,
             "--frames" => frames = Some(next_value(&mut args, "--frames")?.parse()?),
             "--quality" => quality = next_value(&mut args, "--quality")?.parse()?,
+            "--adaptive-quality" => adaptive_quality = true,
+            "--min-quality" => min_quality = next_value(&mut args, "--min-quality")?.parse()?,
             "--subsamp" => subsamp = parse_subsampling(&next_value(&mut args, "--subsamp")?)?,
             "--jpeg-target" => {
                 jpeg_target = parse_jpeg_target(&next_value(&mut args, "--jpeg-target")?)?
@@ -1280,7 +2502,13 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--transport" => transport = parse_transport(&next_value(&mut args, "--transport")?)?,
             "--ready" => ready = true,
             "--power-on" => power_on = true,
+            "--reset-jpeg-engine" => reset_jpeg_engine = true,
             "--profile" => profile = true,
+            "--async-send" => async_send = true,
+            "--drop-late-frames" => drop_late_frames = true,
+            "--dirty-mode" => {
+                dirty_mode = parse_dirty_mode(&next_value(&mut args, "--dirty-mode")?)?
+            }
             "--dry-run" => dry_run = true,
             "--ram-size-mb" => ram_size_mb = Some(next_value(&mut args, "--ram-size-mb")?.parse()?),
             "--usb-timeout-ms" => {
@@ -1301,6 +2529,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     if !(1..=100).contains(&quality) {
         return Err("--quality must be 1..100".into());
     }
+    if !(1..=100).contains(&min_quality) {
+        return Err("--min-quality must be 1..100".into());
+    }
+    if min_quality > quality {
+        return Err("--min-quality must be less than or equal to --quality".into());
+    }
 
     Ok(Options {
         display_index,
@@ -1310,6 +2544,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         fps,
         frames,
         quality,
+        adaptive_quality,
+        min_quality,
         subsamp,
         jpeg_target,
         chroma_mode,
@@ -1320,13 +2556,27 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         raw_bulk_mode,
         ready,
         power_on,
+        reset_jpeg_engine,
         profile,
+        async_send,
+        drop_late_frames,
+        dirty_mode,
         dry_run,
         ram_size_mb,
         usb_timeout_ms,
         max_packet_size,
         dump_first_frame,
     })
+}
+
+fn parse_dirty_mode(value: &str) -> Result<DirtyMode, Box<dyn Error>> {
+    match value {
+        "off" => Ok(DirtyMode::Off),
+        "log" => Ok(DirtyMode::Log),
+        "bbox" => Ok(DirtyMode::Bbox),
+        "tile-send" => Ok(DirtyMode::TileSend),
+        _ => Err("--dirty-mode must be one of off, log, bbox, tile-send".into()),
+    }
 }
 
 fn parse_jpeg_target(value: &str) -> Result<JpegTarget, Box<dyn Error>> {
@@ -1439,6 +2689,8 @@ Options:\n\
     --fps N                 Virtual display refresh/send cap, default 60\n\
     --frames N              Stop after N sent frames\n\
     --quality N             TurboJPEG quality 1..100, default 95\n\
+    --adaptive-quality      Dynamically lower JPEG quality when frame time exceeds the fps budget\n\
+    --min-quality N         Minimum adaptive JPEG quality, default 85\n\
     --subsamp 420|422|444   JPEG chroma subsampling, default 420\n\
     --jpeg-target nv12|yv12|yuv444\n\
                             Target format for JPEG decoder output, default nv12\n\
@@ -1455,7 +2707,12 @@ Options:\n\
                             Frame transport, default jpeg\n\
     --ready                 Send software-ready before capture\n\
     --power-on              Send monitor power-on before capture\n\
+    --reset-jpeg-engine     Send vendor JPEG engine reset before capture\n\
     --profile               Print average convert/encode/packet/USB timings every 60 sent frames\n\
+    --async-send            Copy latest captured frame in the callback and send from a worker thread\n\
+    --drop-late-frames      Drop JPEG frames after encode if they already missed the frame budget\n\
+    --dirty-mode off|log|bbox|tile-send\n\
+                            Dirty rect profiling mode, default log. bbox/tile-send crop-encode dirty rect tiles for measurement only\n\
     --dry-run               Capture/encode/packetize but do not open USB or send\n\
     --ram-size-mb N         RAM size for dry-run address planning, default 58\n\
     --usb-timeout-ms N      USB transfer timeout, default 3000\n\
@@ -1468,7 +2725,7 @@ Options:\n\
 mod tests {
     use super::{
         ChromaMode, Rotation, YuvMatrix, YuvRange, bgra_to_nv12, bgra_to_yv12, rgb_to_nv12,
-        rgb_to_yv12, source_coordinate,
+        rgb_to_yv12, rotate_bgra_with_vimage, source_coordinate,
     };
 
     #[test]
@@ -1549,6 +2806,25 @@ mod tests {
         assert_eq!(direct, via_rgb);
     }
 
+    #[test]
+    fn vimage_bgra_rotation_matches_existing_rgb_rotation() {
+        let rgb = sample_rgb_4x2();
+        let bgra = bgra_from_rgb(&rgb);
+
+        for rotation in [Rotation::Deg90, Rotation::Deg180, Rotation::Deg270] {
+            let mut rotated_bgra = Vec::new();
+            let (width, height, stride) =
+                rotate_bgra_with_vimage(bgra.as_ptr(), 4, 2, 4 * 4, rotation, &mut rotated_bgra)
+                    .unwrap();
+            let rotated_rgb = rgb_from_bgra(&rotated_bgra, width, height, stride);
+
+            let mut expected_rgb = Vec::new();
+            super::copy_bgra_to_rgb_bytes(bgra.as_ptr(), 4, 2, 4 * 4, rotation, &mut expected_rgb);
+
+            assert_eq!(rotated_rgb, expected_rgb, "rotation {rotation:?}");
+        }
+    }
+
     fn sample_rgb_4x2() -> Vec<u8> {
         vec![
             255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 32, 64, 96, 96, 64, 32, 12, 24, 36,
@@ -1566,5 +2842,18 @@ mod tests {
         }
 
         bgra
+    }
+
+    fn rgb_from_bgra(bgra: &[u8], width: usize, height: usize, stride: usize) -> Vec<u8> {
+        let mut rgb = Vec::with_capacity(width * height * 3);
+        for y in 0..height {
+            let row = &bgra[y * stride..y * stride + width * 4];
+            for pixel in row.chunks_exact(4) {
+                rgb.push(pixel[2]);
+                rgb.push(pixel[1]);
+                rgb.push(pixel[0]);
+            }
+        }
+        rgb
     }
 }

@@ -7,7 +7,8 @@ use crate::{
     DisplayInterrupt, EDID_BLOCK_SIZE, EDID_MAX_BLOCKS, EP_BULK_OUT, EP_INTERRUPT_IN, Edid,
     INTERRUPT_PACKET_SIZE, JpegFramePacket, PRODUCT_ID_JUA365, RawFramePacket, VENDOR_ID,
     VENDOR_REQ_GET_EDID, VENDOR_REQ_QUERY_MONITOR_CONNECTION_STATUS,
-    VENDOR_REQ_QUERY_VIDEO_RAM_SIZE, VENDOR_REQ_SET_MONITOR_CONTROL, VENDOR_REQ_SET_SOFTWARE_READY,
+    VENDOR_REQ_QUERY_VIDEO_RAM_SIZE, VENDOR_REQ_RESET_JPEG_ENGINE, VENDOR_REQ_SET_MONITOR_CONTROL,
+    VENDOR_REQ_SET_SOFTWARE_READY,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -131,6 +132,11 @@ impl T6Device {
             &[],
         )
         .map(|_| ())
+    }
+
+    pub fn reset_jpeg_engine(&self, display_index: u16) -> rusb::Result<()> {
+        self.write_vendor_control(VENDOR_REQ_RESET_JPEG_ENGINE, display_index, 0, &[])
+            .map(|_| ())
     }
 
     pub fn read_interrupt_once(&self) -> rusb::Result<DisplayInterrupt> {

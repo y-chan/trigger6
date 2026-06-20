@@ -4,6 +4,7 @@
 #import <IOSurface/IOSurface.h>
 #import <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -52,7 +53,22 @@ typedef void (*t6_vd_frame_callback)(
     size_t plane1_width,
     size_t plane1_height,
     size_t plane1_stride,
+    size_t dirty_rect_count,
+    size_t dirty_min_x,
+    size_t dirty_min_y,
+    size_t dirty_width,
+    size_t dirty_height,
+    uint64_t dirty_area,
+    const void *dirty_rects,
+    size_t dirty_rects_len,
     void *user_data);
+
+typedef struct {
+    size_t x;
+    size_t y;
+    size_t width;
+    size_t height;
+} T6DirtyRect;
 
 static CGVirtualDisplay *g_display = nil;
 static CGDisplayStreamRef g_stream = NULL;
@@ -69,6 +85,10 @@ typedef CGDisplayStreamRef (*CGDisplayStreamCreateWithDispatchQueueFn)(
     CGDisplayStreamFrameAvailableHandler handler);
 typedef CGError (*CGDisplayStreamStartFn)(CGDisplayStreamRef displayStream);
 typedef CGError (*CGDisplayStreamStopFn)(CGDisplayStreamRef displayStream);
+typedef const CGRect *(*CGDisplayStreamUpdateGetRectsFn)(
+    CGDisplayStreamUpdateRef updateRef,
+    int32_t rectType,
+    size_t *rectCount);
 
 static uint32_t t6_fourcc_420f(void) {
     return ((uint32_t)'4' << 24) | ((uint32_t)'2' << 16) | ((uint32_t)'0' << 8) | (uint32_t)'f';
@@ -84,6 +104,91 @@ static CFStringRef t6_cg_string_symbol(const char *name) {
         return NULL;
     }
     return *symbol;
+}
+
+static void t6_vd_get_dirty_summary(
+    CGDisplayStreamUpdateRef update_ref,
+    size_t surface_width,
+    size_t surface_height,
+    size_t *dirty_rect_count,
+    size_t *dirty_min_x,
+    size_t *dirty_min_y,
+    size_t *dirty_width,
+    size_t *dirty_height,
+    uint64_t *dirty_area,
+    T6DirtyRect *dirty_rects,
+    size_t dirty_rects_capacity,
+    size_t *dirty_rects_len) {
+    *dirty_rect_count = 0;
+    *dirty_min_x = 0;
+    *dirty_min_y = 0;
+    *dirty_width = 0;
+    *dirty_height = 0;
+    *dirty_area = 0;
+    *dirty_rects_len = 0;
+
+    if (update_ref == NULL || surface_width == 0 || surface_height == 0) {
+        return;
+    }
+
+    CGDisplayStreamUpdateGetRectsFn get_rects =
+        (CGDisplayStreamUpdateGetRectsFn)dlsym(RTLD_DEFAULT, "CGDisplayStreamUpdateGetRects");
+    if (get_rects == NULL) {
+        return;
+    }
+
+    size_t rect_count = 0;
+    const CGRect *rects = get_rects(update_ref, 2, &rect_count);
+    if (rects == NULL || rect_count == 0) {
+        return;
+    }
+
+    CGFloat min_x = (CGFloat)surface_width;
+    CGFloat min_y = (CGFloat)surface_height;
+    CGFloat max_x = 0.0;
+    CGFloat max_y = 0.0;
+    uint64_t area = 0;
+    size_t valid_count = 0;
+
+    for (size_t i = 0; i < rect_count; i++) {
+        CGRect rect = CGRectIntersection(rects[i], CGRectMake(0, 0, surface_width, surface_height));
+        if (CGRectIsNull(rect) || CGRectIsEmpty(rect)) {
+            continue;
+        }
+
+        CGFloat rect_min_x = CGRectGetMinX(rect);
+        CGFloat rect_min_y = CGRectGetMinY(rect);
+        CGFloat rect_max_x = CGRectGetMaxX(rect);
+        CGFloat rect_max_y = CGRectGetMaxY(rect);
+        min_x = MIN(min_x, rect_min_x);
+        min_y = MIN(min_y, rect_min_y);
+        max_x = MAX(max_x, rect_max_x);
+        max_y = MAX(max_y, rect_max_y);
+        area += (uint64_t)ceil(CGRectGetWidth(rect)) * (uint64_t)ceil(CGRectGetHeight(rect));
+        if (*dirty_rects_len < dirty_rects_capacity) {
+            size_t rect_x = (size_t)floor(rect_min_x);
+            size_t rect_y = (size_t)floor(rect_min_y);
+            dirty_rects[*dirty_rects_len] = (T6DirtyRect){
+                rect_x,
+                rect_y,
+                (size_t)ceil(rect_max_x) - rect_x,
+                (size_t)ceil(rect_max_y) - rect_y,
+            };
+            *dirty_rects_len += 1;
+        }
+        valid_count++;
+    }
+
+    if (valid_count == 0 || max_x <= min_x || max_y <= min_y) {
+        return;
+    }
+
+    *dirty_rect_count = valid_count;
+    *dirty_min_x = (size_t)floor(min_x);
+    *dirty_min_y = (size_t)floor(min_y);
+    *dirty_width = (size_t)ceil(max_x) - *dirty_min_x;
+    *dirty_height = (size_t)ceil(max_y) - *dirty_min_y;
+    *dirty_area = area;
 }
 
 const char *t6_vd_last_error(void) {
@@ -103,7 +208,9 @@ uint32_t t6_vd_start(
             return 0;
         }
 
-        g_queue = dispatch_queue_create("dev.trigger6.virtual-display", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_attr_t queue_attr =
+            dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+        g_queue = dispatch_queue_create("dev.trigger6.virtual-display", queue_attr);
 
         CGVirtualDisplayDescriptor *descriptor = [[CGVirtualDisplayDescriptor alloc] init];
         descriptor.queue = g_queue;
@@ -182,14 +289,13 @@ uint32_t t6_vd_start(
               uint64_t display_time,
               IOSurfaceRef frame_surface,
               CGDisplayStreamUpdateRef update_ref) {
+                @autoreleasepool {
                 (void)display_time;
-                (void)update_ref;
-
-                if (status != kCGDisplayStreamFrameStatusFrameComplete ||
-                    frame_surface == NULL ||
-                    callback == NULL) {
-                    return;
-                }
+	                if (status != kCGDisplayStreamFrameStatusFrameComplete ||
+	                    frame_surface == NULL ||
+	                    callback == NULL) {
+	                    return;
+	                }
 
                 IOSurfaceLock(frame_surface, kIOSurfaceLockReadOnly, NULL);
                 size_t plane_count = IOSurfaceGetPlaneCount(frame_surface);
@@ -201,34 +307,84 @@ uint32_t t6_vd_start(
                     size_t uv_stride = IOSurfaceGetBytesPerRowOfPlane(frame_surface, 1);
                     size_t y_width = IOSurfaceGetWidthOfPlane(frame_surface, 0);
                     size_t y_height = IOSurfaceGetHeightOfPlane(frame_surface, 0);
-                    size_t uv_width = IOSurfaceGetWidthOfPlane(frame_surface, 1);
-                    size_t uv_height = IOSurfaceGetHeightOfPlane(frame_surface, 1);
+	                    size_t uv_width = IOSurfaceGetWidthOfPlane(frame_surface, 1);
+	                    size_t uv_height = IOSurfaceGetHeightOfPlane(frame_surface, 1);
+	                    size_t dirty_rect_count = 0;
+	                    size_t dirty_min_x = 0;
+	                    size_t dirty_min_y = 0;
+	                    size_t dirty_width = 0;
+	                    size_t dirty_height = 0;
+	                    uint64_t dirty_area = 0;
+	                    T6DirtyRect dirty_rects[32];
+	                    size_t dirty_rects_len = 0;
+	                    t6_vd_get_dirty_summary(
+	                        update_ref,
+	                        y_width,
+	                        y_height,
+	                        &dirty_rect_count,
+	                        &dirty_min_x,
+	                        &dirty_min_y,
+	                        &dirty_width,
+	                        &dirty_height,
+	                        &dirty_area,
+	                        dirty_rects,
+	                        32,
+	                        &dirty_rects_len);
 
-                    if (y_base != NULL && uv_base != NULL) {
-                        callback(
-                            pixel_format,
+	                    if (y_base != NULL && uv_base != NULL) {
+	                        callback(
+	                            pixel_format,
                             y_base,
                             y_stride * y_height,
                             y_width,
                             y_height,
                             y_stride,
                             uv_base,
-                            uv_stride * uv_height,
-                            uv_width,
-                            uv_height,
-                            uv_stride,
-                            user_data);
-                    }
-                } else {
-                    uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(frame_surface);
-                    size_t stride = IOSurfaceGetBytesPerRow(frame_surface);
-                    size_t surface_width = IOSurfaceGetWidth(frame_surface);
-                    size_t surface_height = IOSurfaceGetHeight(frame_surface);
-                    size_t byte_count = stride * surface_height;
+	                            uv_stride * uv_height,
+	                            uv_width,
+	                            uv_height,
+	                            uv_stride,
+	                            dirty_rect_count,
+	                            dirty_min_x,
+	                            dirty_min_y,
+	                            dirty_width,
+	                            dirty_height,
+	                            dirty_area,
+	                            dirty_rects,
+	                            dirty_rects_len,
+	                            user_data);
+	                    }
+	                } else {
+	                    uint8_t *base = (uint8_t *)IOSurfaceGetBaseAddress(frame_surface);
+	                    size_t stride = IOSurfaceGetBytesPerRow(frame_surface);
+	                    size_t surface_width = IOSurfaceGetWidth(frame_surface);
+	                    size_t surface_height = IOSurfaceGetHeight(frame_surface);
+	                    size_t byte_count = stride * surface_height;
+	                    size_t dirty_rect_count = 0;
+	                    size_t dirty_min_x = 0;
+	                    size_t dirty_min_y = 0;
+	                    size_t dirty_width = 0;
+	                    size_t dirty_height = 0;
+	                    uint64_t dirty_area = 0;
+	                    T6DirtyRect dirty_rects[32];
+	                    size_t dirty_rects_len = 0;
+	                    t6_vd_get_dirty_summary(
+	                        update_ref,
+	                        surface_width,
+	                        surface_height,
+	                        &dirty_rect_count,
+	                        &dirty_min_x,
+	                        &dirty_min_y,
+	                        &dirty_width,
+	                        &dirty_height,
+	                        &dirty_area,
+	                        dirty_rects,
+	                        32,
+	                        &dirty_rects_len);
 
-                    if (base != NULL && stride >= surface_width * 4) {
-                        callback(
-                            pixel_format,
+	                    if (base != NULL && stride >= surface_width * 4) {
+	                        callback(
+	                            pixel_format,
                             base,
                             byte_count,
                             surface_width,
@@ -236,14 +392,23 @@ uint32_t t6_vd_start(
                             stride,
                             NULL,
                             0,
-                            0,
-                            0,
-                            0,
-                            user_data);
-                    }
-                }
+	                            0,
+	                            0,
+	                            0,
+	                            dirty_rect_count,
+	                            dirty_min_x,
+	                            dirty_min_y,
+	                            dirty_width,
+	                            dirty_height,
+	                            dirty_area,
+	                            dirty_rects,
+	                            dirty_rects_len,
+	                            user_data);
+	                    }
+	                }
 
                 IOSurfaceUnlock(frame_surface, kIOSurfaceLockReadOnly, NULL);
+                }
             });
 
         if (g_stream == NULL || start_stream(g_stream) != kCGErrorSuccess) {

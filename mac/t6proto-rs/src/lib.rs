@@ -61,6 +61,7 @@ pub const EDID_MAX_BLOCKS: usize = 4;
 pub const DEFAULT_MAX_BULK_PACKET_SIZE: u32 = 0x19000;
 pub const JPEG_PADDING_SIZE: usize = 1024;
 pub const VIDEO_FLAG_RESET_JPEG: u8 = 0x80;
+pub const TYPE7_JPEG_TILE_HEADER_SIZE: usize = 48;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Edid {
@@ -480,6 +481,73 @@ pub struct RawFramePacket {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Type7JpegTilePacket {
+    pub payload_address: u32,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Type7JpegTileHeader {
+    pub tile_type: u32,
+    pub data_len: u32,
+    pub sequence: u32,
+    pub hint: u32,
+    pub size: u32,
+    pub canvas: u32,
+    pub start_addr: u32,
+    pub end_addr: u32,
+    pub reserved: u32,
+    pub image_format: u32,
+    pub reserved2: u32,
+    pub reserved3: u32,
+}
+
+impl Type7JpegTileHeader {
+    pub fn jpeg(
+        jpeg_len: usize,
+        sequence: u32,
+        width: u16,
+        height: u16,
+        canvas_width: u16,
+        canvas_height: u16,
+        start_addr: u32,
+        end_addr: u32,
+    ) -> Self {
+        Self {
+            tile_type: 7,
+            data_len: (jpeg_len + TYPE7_JPEG_TILE_HEADER_SIZE) as u32,
+            sequence,
+            hint: 6,
+            size: (u32::from(height) << 16) | u32::from(width),
+            canvas: (u32::from(canvas_height) << 16) | u32::from(canvas_width),
+            start_addr,
+            end_addr,
+            reserved: 0,
+            image_format: VIDEO_COLOR_JPEG,
+            reserved2: 0,
+            reserved3: 0,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; TYPE7_JPEG_TILE_HEADER_SIZE] {
+        let mut out = [0; TYPE7_JPEG_TILE_HEADER_SIZE];
+        out[0..4].copy_from_slice(&self.tile_type.to_le_bytes());
+        out[4..8].copy_from_slice(&self.data_len.to_le_bytes());
+        out[8..12].copy_from_slice(&self.sequence.to_le_bytes());
+        out[12..16].copy_from_slice(&self.hint.to_le_bytes());
+        out[16..20].copy_from_slice(&self.size.to_le_bytes());
+        out[20..24].copy_from_slice(&self.canvas.to_le_bytes());
+        out[24..28].copy_from_slice(&self.start_addr.to_le_bytes());
+        out[28..32].copy_from_slice(&self.end_addr.to_le_bytes());
+        out[32..36].copy_from_slice(&self.reserved.to_le_bytes());
+        out[36..40].copy_from_slice(&self.image_format.to_le_bytes());
+        out[40..44].copy_from_slice(&self.reserved2.to_le_bytes());
+        out[44..48].copy_from_slice(&self.reserved3.to_le_bytes());
+        out
+    }
+}
+
 impl JpegFramePacket {
     pub fn new(
         display_index: u8,
@@ -662,6 +730,55 @@ impl RawFramePacket {
     }
 }
 
+impl Type7JpegTilePacket {
+    pub fn new(
+        jpeg: &[u8],
+        payload_address: u32,
+        sequence: u32,
+        width: u16,
+        height: u16,
+        canvas_width: u16,
+        canvas_height: u16,
+        start_addr: u32,
+        end_addr: u32,
+    ) -> Self {
+        let header = Type7JpegTileHeader::jpeg(
+            jpeg.len(),
+            sequence,
+            width,
+            height,
+            canvas_width,
+            canvas_height,
+            start_addr,
+            end_addr,
+        );
+        let mut payload = Vec::with_capacity(TYPE7_JPEG_TILE_HEADER_SIZE + jpeg.len());
+        payload.extend_from_slice(&header.to_bytes());
+        payload.extend_from_slice(jpeg);
+
+        Self {
+            payload_address,
+            payload,
+        }
+    }
+
+    pub fn bulk_chunks(&self, max_packet_size: u32) -> Vec<BulkTransferChunk<'_>> {
+        fragments(self.payload.len() as u32, max_packet_size)
+            .map(|fragment| BulkTransferChunk {
+                header: BulkDmaHeader::display(
+                    self.payload.len() as u32,
+                    self.payload_address,
+                    fragment.size,
+                    fragment.offset,
+                    fragment.more,
+                ),
+                data: &self.payload
+                    [fragment.offset as usize..(fragment.offset + fragment.size) as usize],
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BulkTransferChunk<'a> {
     pub header: BulkDmaHeader,
@@ -733,6 +850,10 @@ impl FrameScheduler {
     pub fn next_jpeg_frame(&mut self, jpeg_len: usize) -> FrameAddresses {
         self.fb_index = (self.fb_index + 1) % self.fb_addrs.len();
         let fb_addr = self.fb_addrs[self.fb_index];
+        self.next_jpeg_payload(jpeg_len, fb_addr)
+    }
+
+    pub fn next_jpeg_payload(&mut self, jpeg_len: usize, fb_addr: u32) -> FrameAddresses {
         let cmd_offset = jpeg_cmd_offset(jpeg_len + JPEG_PADDING_SIZE + VIDEO_FLIP_HEADER_SIZE);
         let mut reset_jpeg = false;
 

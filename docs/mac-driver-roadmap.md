@@ -1,278 +1,306 @@
 # macOS Trigger 6 実装ロードマップ
 
-macOS 向け実装では、まず「画面をどこから取得するか」と「Trigger 6 へ USB でどう送るか」を分けて考える。最初から DriverKit の表示ドライバを作るのではなく、ユーザー空間で USB 転送とフレーム生成を検証してから判断する。
+このロードマップは、2026-06 時点の実機検証結果を反映したもの。目的は protocol の完全解明ではなく、Mac で 1080p 60 Hz 相当の仮想ディスプレイを安定表示し、公式 Mac ドライバにない回転対応を実用化すること。
 
-## 段階 1: USB 転送の実証
+## 現在地
 
-目的は、ユーザー空間のコマンドラインツールで USB デバイスを確保し、既知の 1 フレームを送れる状態にすること。
+すでにできていること:
 
-範囲:
+- `0711:5601` の検出、interface claim、EDID、monitor status、video RAM size の取得。
+- HDMI 接続先の EDID 読み出し。
+- 静止画、PNG などの入力画像を T6 に送信。
+- MP4 を decode して送信。
+- `CGVirtualDisplay` + `CGDisplayStream` による DeskPad 風の仮想ディスプレイ prototype。
+- cursor 表示。
+- 90 度回転表示。
+- `jpeg`, `nv12`, `yv12`, `yuv444` raw transport の実験。
+- JPEG 4:4:4 + T6 target `yuv444` で、JPEG 4:2:0 由来の信号機ボタン滲みを大きく改善。
+- USB 転送の header/data 時間を分けた profile。
+- capture callback と sender を分ける `--async-send` 実験。
+- TurboJPEG direct BGRA encode と vImage 回転による変換時間削減。
+- `CGDisplayStreamUpdateGetRects` による dirty rect 観測。
+- dirty rect 個別 tile の crop + JPEG encode probe。
+- `Type7JpegTilePacket` / `Type7JpegTileHeader` の protocol builder。
+- `--reset-jpeg-engine` による復旧用 vendor request。
 
-- `0711:5601` を確保する。
-- 必要な vendor control request を送る。
-  - software ready `0x31`
-  - monitor status `0x87`
-  - EDID `0x80`
-  - video RAM size `0x88`
-  - monitor power `0x03`
-  - timing setup `0x12` または resolution index `0x08`
-- 公式 `T6BULKDMAHDR` layout に従って display bulk transfer を送る。
-- interrupt endpoint `0x83` から display fence と JPEG error event を読む。
-- 静止 JPEG フレームを upload する。
+現在の主な問題:
 
-依存なしの protocol core は `mac/t6proto-rs` から始める。低レベル比較や C/DriverKit 実験用に `mac/t6proto` の C 版も残す。最初の USB 向け tool は `t6-probe`。
+- 全画面 JPEG 4:4:4 encode が重く、平均は 60 fps 圏内でも `encode=100ms+` 級のスパイクが出る。
+- 画面全体が大きく変わる場合に encode 負荷が跳ねる。
+- adaptive quality は平均負荷には効くが、長いスパイクを根本的には消せない。
+- raw `nv12` / `yv12` は速いが、4:2:0 のため UI の赤/緑/青の細部が滲む。
+- `rgb24` は大きく、連続転送で I/O error が出やすい。
+- `yuv444` raw は画質は良いが帯域が大きく、常用 path としては厳しい。
+- type 7 tile 実送信は、部分的な色ズレやデバイス側 stall を起こした。現時点では実送信 path を止め、probe / builder のみに戻している。
+- dirty bounding box 1枚方式は、離れた小矩形を巨大 bbox にまとめるため効率が悪く、表示更新にも不安定さが見えた。
 
-```sh
-cd mac/t6proto-rs
-cargo run --features usb --bin t6-probe -- --claim
-```
+現時点の判断:
 
-## 段階 2: フレーム取得元の実証
+- 画質優先の本命は `jpeg --subsamp 444 --jpeg-target yuv444`。
+- 速度優先の fallback は `nv12` または `yv12`。
+- dirty rect 個別 tile encode は非常に有望。実測では full-frame JPEG が数百 KB / encode spike 大なのに対し、tile probe は数 KB から十数万 byte 程度、encode も軽い。
+- 次の最重要課題は type 7 実送信を急ぐことではなく、Windows capture から「type 7 tile がどの表示面へ、どの手順で反映されるか」を詰めること。
 
-macOS 上でフレームを取得し、段階 1 の転送 prototype に渡す。
+## 短期ロードマップ
 
-推奨順:
+### 1. dirty rect 観測
 
-1. 静的に生成したフレーム。
-2. 画像ファイル。
-3. ScreenCaptureKit によるメインディスプレイの mirror。
-4. `CGVirtualDisplay` を使う DeskPad 風の仮想ディスプレイ取得元。
+目的は、macOS の仮想ディスプレイ更新が実際にどの程度の矩形として通知されるかを測ること。
 
-この段階はユーザー空間のまま進める。JPEG encode、回転、フレーム間隔制御、USB scheduling は DriverKit 外で debug する方が圧倒的に扱いやすい。
+実装済み:
 
-## 段階 3: 仮想ディスプレイ prototype
+- `CGDisplayStreamUpdateGetRects(update_ref, kCGDisplayStreamUpdateDirtyRects, &count)` を Objective-C bridge に追加した。
+- Rust callback へ dirty rect count、bounding box、dirty area、個別 dirty rect 配列を渡している。
+- `--profile` に以下を追加した。
+  - dirty rect count
+  - dirty area ratio
+  - bounding box width/height
+  - full-frame 扱いになった回数
+- `--dirty-mode log|bbox|tile-send` で dirty rect の測定を切り替えられる。
 
-仮想ディスプレイの OSS 参考実装としては DeskPad が最有力。想定する prototype の流れは次の形。
+実測から分かったこと:
 
-```text
-CGVirtualDisplay
-  -> ScreenCaptureKit frame stream
-  -> BGRA frame buffer
-  -> TurboJPEG JPEG または NV12/YV12
-  -> T6 bulk transfer
-  -> interrupt fence wait
-```
+- 通常操作では dirty area が小さいことが多く、tile JPEG 化の価値は高い。
+- ただし fullish update も混ざるため、全面更新時は full-frame fallback が必要。
+- dirty bbox は dirty area より大きくなりやすい。特に離れた小矩形があると、bbox 方式は実効面積を大きく見積もる。
 
-リスク:
+### 2. dirty rect を使った encode 範囲削減
 
-- `CGVirtualDisplay` は private API 寄り。
-- entitlement の扱いが通常の public app entitlement と違う。
-- ローカル prototype には有用でも、再配布可能な driver として成立するとは限らない。
+目的は、送信 protocol をまだ変えずに、CPU 負荷と payload がどこまで下がるかを見ること。
 
-## 段階 4: DriverKit 判断
+実装済み:
 
-DriverKit/System Extension の display path は、ユーザー空間 prototype で USB 転送とフレーム処理 pipeline が成立してから検討する。
+- `--dirty-mode bbox` で dirty rect tile の crop + JPEG encode probe を行う。
+- `tile_probe avg_ms convert/encode`, `avg_payload`, `max_payload` を profile に出す。
+- `bbox` という名前は残っているが、現状の実体は個別 dirty rect の tile encode probe。
 
-確認すべきこと:
+実測:
 
-- public な DriverKit display extension で必要な表示挙動を出せるか。
-- 必要な entitlement が何で、それが取得可能か。
-- USB device を DEXT が所有しつつ、フレーム encode をユーザー空間 agent に残せるか。
-- install / signing / notarization の実運用フロー。
+- full-frame JPEG は `300KB` から `400KB` 程度になりやすく、`encode=100ms+` の spike が出る。
+- tile probe は小更新で数 KB、重めの更新でも十数万 byte 程度に収まることが多い。
+- tile probe encode は平均数 ms 以下になりやすく、full-frame よりかなり軽い。
+- 一方で probe自体も追加処理なので、profile時の総負荷には注意する。
 
-## 段階 5: 性能と回転
+### 3. Windows 1080p 型 `type=0x7` JPEG tile path
 
-まず正しさを優先し、その後で最適化する。
+目的は、Windows capture で見えている 1080p の dirty/tile JPEG upload を Mac 実装に移植すること。
 
-- full-frame JPEG
-- TurboJPEG transform による JPEG 回転
-- USB3 / 高解像度向け NV12/YV12 path
-- dirty rectangle upload
-- VRAM allocator
-- fence に基づく queue depth 制御
-- USB2 / USB3 での送信方式切替
+根拠:
 
-## 難易度マップ
+- Windows 1080p capture では `type=0x7 format=0x0d` が多く、`64x1080`, `128x576`, `1824x96` などの JPEG tile が見えている。
+- `width_field` / `height_field` は JPEG SOF と一致する。
+- 公式 Mac user-space driver 文字列にも `t6_submit_frame_surface_with_compressed_dirty_rects` がある。
 
-目標は protocol を完全解明することではない。まず 1 つの表示 path を安定させ、必要になった部分だけ広げる。
+実装済み:
 
-### 低から中程度
+- Rust protocol core に type 7 JPEG tile packet builder を追加した。
+- header fields は capture 由来の layout を使う。
+  - `w0 = 0x7`
+  - `w1 = jpeg_len + 0x30`
+  - `w4 = height << 16 | width`
+  - `w5 = canvas_height << 16 | canvas_width`
+  - `w6/w7 = VRAM start/end`
+  - `w9 = 0x0d`
+- `--dirty-mode tile-send` で一度 type 7 実送信を試した。
+- 実送信は部分的な色ズレと device stall を起こしたため、現在は送信を止め、probe専用へ戻している。
 
-#### USB protocol probe
+分かったこと:
 
-取り組みやすい理由:
+- type 7 header の形だけでは不十分。tile後に必要な flip/fence/commit 手順、または target surface の選び方が未解明。
+- `w6/w7` は単純な screen coordinate ではなく、VRAM allocator / surface state / fence と結びついている可能性が高い。
+- device stall を起こすため、type 7 実送信は安全策なしに繰り返さない。
+- 回転時は dirty rect と VRAM offset の対応が入れ替わる。
 
-- vendor request は Linux、macOS 静的解析、capture からかなり特定できている。
-- `rusb` で同じ control transfer をユーザー空間から送れる。
-- 失敗は `busy`、`timeout`、`pipe` error として見えることが多い。
+次に必要なこと:
 
-残るリスク:
+- Windows capture の type 7 周辺で、tile payload の前後に出る command / interrupt / fence を時系列で見る。
+- `cmd_dest`, bulk payload address, header `start_addr/end_addr`, fence ID の関係を整理する。
+- type 7が「表示中surfaceへ直接patch」なのか、「別surface/VRAM payload zoneへuploadして別commandでcommit」なのかを切り分ける。
+- 実送信再開時は、1枚だけ、固定tileだけ、`--frames 1`、直後に `--reset-jpeg-engine` できる状態で行う。
 
-- 公式 macOS DEXT が USB device を排他的に掴む可能性がある。
-- request 順序への依存は実機で初めて見える可能性がある。
+### 4. full-frame path の安定化
 
-#### 静止 JPEG フレーム upload
+dirty rect と並行して、現行の全画面 path も fallback として維持する。
 
-取り組みやすい理由:
+作業:
 
-- Ubuntu 公式実装に `t6_libusb_FilpJpegFrame()` がある。
-- bulk DMA header layout が分かっている。
-- `VIDEO_FLIP_HEADER` layout が分かっている。
-- JPEG source format、NV12 target format、1024 byte padding、`cmdAddr` の使い方が vendor code に出ている。
+- `jpeg 444 -> yuv444` の推奨引数を固定する。
+- `quality 85` 付近を default 候補にする。
+- `--drop-late-frames` は「遅延蓄積を避ける」目的で残す。
+- async sender の callback copy 時間を継続測定する。
+- encode spike が TurboJPEG 側か input frame lock/IOSurface 側かを切り分ける。
 
-残るリスク:
+判断:
 
-- `cmdAddr` / `fbAddr` 初期化は device RAM size と port layout に合わせる必要がある。
-- 最初の数フレームでは JPEG reset flag の挙動が効く可能性がある。
+- full-frame JPEG 4:4:4 単体で安定 60 fps は厳しい前提で見る。
+- ただし dirty rect が効かない場面の fallback としては必要。
 
-#### 1080p single-output full-frame display
+### 5. raw YUV fallback
 
-取り組みやすい理由:
+目的は、品質より滑らかさを優先するモードを残すこと。
 
-- 最も単純な既知 path である full-frame JPEG を使える。
-- 1 port 1080p の VRAM layout は Ubuntu source にコメントと実装がある。
-- dirty rect、multi-output 調停、4K bandwidth 問題を避けられる。
+候補:
 
-残るリスク:
+- `nv12`: CGDisplayStream から直接 `420f/420v` 取得できるため、変換を減らせる。
+- `yv12`: T6 側で動作確認済み。
+- raw `yuv444`: 画質は高いが帯域が大きいため、限定用途。
 
-- 連続表示では queue 制御と error recovery が必要。
-- macOS フレーム取得と USB scheduling で latency spike を抑える必要がある。
+方針:
 
-### 中程度
+- `nv12` / `yv12` は低負荷 fallback。
+- UI の色滲みが問題になる通常利用では JPEG 4:4:4 を優先。
+- 全面動画など、画質劣化が目立ちにくく encode 負荷が高い場面では raw YUV へ切り替える余地を残す。
 
-#### ScreenCaptureKit mirror source
+## 中期ロードマップ
 
-中程度で済む理由:
+### fence / queue 制御
 
-- ScreenCaptureKit は public API。
-- true display driver を作らなくても、取得したフレームを encode して送れる。
+公式 Ubuntu ドライバは capture callback 内で USB 送信まで完結させず、浅い queue と sender thread で backpressure をかけている。Rust 版もこの方向に寄せる。
 
-簡単ではない理由:
+作業:
 
-- 権限と初回 UX が必要。
-- pixel format、timing、backpressure を丁寧に扱う必要がある。
-- mirror は本物の extended desktop ではない。
+- interrupt endpoint `0x83` の fence ID を送信 frame と対応付ける。
+- queue depth を 1 から 3 程度で制御する。
+- JPEG decoder error interrupt 時に JPEG engine reset / frame drop / resync を行う。
+- type 7 実験時は、JPEG error / fence interrupt を必ず同時に見る。
 
-#### software rotation
+難しい理由:
 
-中程度で済む理由:
+- interrupt event format はある程度見えているが、正確な queue policy は仕様化されていない。
+- 待ちすぎると latency が増え、待たなすぎると VRAM 上書きや decoder error の原因になる。
 
-- Ubuntu 公式実装でも TurboJPEG transform による JPEG 回転を使っている。
-- full-frame update なら 90/180/270 度の考え方は単純。
+### 回転と dirty rect の統合
 
-簡単ではない理由:
+現行の 90 度回転は full-frame では成立している。dirty rect 対応後は rect mapping が追加で必要。
 
-- 回転後の width/height、pitch、cursor 座標、EDID/mode selection を揃える必要がある。
-- dirty rect 対応時は rect の変換が難しくなる。
+作業:
 
-#### dirty rectangle / clip upload
+- `Deg90`, `Deg180`, `Deg270` それぞれで dirty rect 座標を出力座標へ変換する。
+- tile の width/height と VRAM offset を回転後の canvas に合わせる。
+- cursor 合成/表示位置が破綻しないか確認する。
 
-中程度で済む理由:
+難しい理由:
 
-- `VIDEO_CMD_CLIP_PRIMARY` / `VIDEO_CMD_CLIP_SECONDARY` が定義されている。
-- Linux の EVDI は dirty rect を返すので、vendor がこの pipeline を想定していた可能性が高い。
+- full-frame 回転と違い、部分矩形は crop、rotate、placement の順序を間違えると斜め崩れや位置ずれになる。
 
-リスクが残る理由:
+### encoder 改善
 
-- clip payload の正確な挙動は実機検証が必要。
-- 回転時は rect mapping が変わる。
-- rect と fence の順序を誤ると表示崩れが起きる。
+候補:
 
-### 中から高
+- TurboJPEG の thread-local compressor / preallocated output buffer を維持する。
+- tile を複数 worker で並列 encode する。
+- VideoToolbox JPEG は probe 済みだが、sampling / latency / hardware support が不安定なら主経路にしない。
+- Metal/CoreImage で BGRA crop/rotate/color conversion を GPU 側に寄せる。
 
-#### 4K30
+判断:
 
-難しくなる理由:
+- tile probe で「全画面を encode しない」効果は確認できた。
+- 先に type 7 の正しいcommit手順を解く。
+- 正しい送信手順が分かった後で、tile encode 並列化やGPU cropを追加する。
 
-- monitor EDID、T6 timing table、T6 4K capability、USB SuperSpeed の全てに依存する。
-- Ubuntu 公式実装でも build option と USB speed によって JPEG / YV12 / NV12 strategy が変わる。
-- VRAM 領域が大きくなり、余裕が減る。
+## 長期ロードマップ
 
-主なリスク:
+### DriverKit / System Extension
 
-- bandwidth と encoder latency。
-- mode programming の正確性。
-- 大きな payload fragmentation と転送失敗時の recovery。
+当面は userspace `rusb` で進める。製品化や常駐化が必要になった場合だけ、USB ownership を DriverKit へ移す。
 
-#### fence-based frame queue
+確認事項:
 
-難しくなる理由:
+- public entitlement で成立するか。
+- 公式 Mac DEXT と競合しない install / uninstall 手順。
+- user-space encode process と DEXT の IPC。
+- sleep/wake、hotplug、crash recovery。
 
-- interrupt event format は分かっているが、正確な queue-depth policy は仕様化されていない。
-- overload 時の firmware behavior は実機で詰める必要がある。
+### 4K path
 
-主なリスク:
+4K は 1080p JPEG tile path と別物として扱う。
 
-- 待ちが少なすぎると buffer を早く上書きしすぎる。
-- 待ちが多すぎると latency が増えるか stall する。
-- JPEG decoder error 時の recovery 方針が必要。
+現時点の仮説:
 
-### 高
+- Windows 4K only capture では `session=7` の raw NV12 rectangle らしき payload が見えている。
+- `total_len == width * height * 3 / 2` が成立する。
+- 1080p の `session=0 type=0x7 JPEG tile` とは別系統。
 
-#### two-output support
+方針:
+
+- 1080p の安定化を先に行う。
+- 4K は high-snaplen capture を増やして、rect placement / destination VRAM / fence を別途解く。
+
+### two-output support
+
+single-output が安定するまで後回し。
 
 難しい理由:
 
 - VRAM を port 間で分割する必要がある。
-- output capability が port ごとに違う。
 - 4K-capable output と 1080p-only output で allocation strategy が違う。
-- USB bandwidth、frame queue、timing を 2 display で調停する必要がある。
+- USB bandwidth と frame queue を 2 display で調停する必要がある。
 
-現実的な進め方:
+## 難易度マップ
 
-- single-output が安定するまで後回し。
-- 既知の two-port device layout を 1 つずつ追加する。
+### 低から中
 
-#### macOS の本物の仮想ディスプレイ / extended desktop
+- USB probe / EDID / monitor status。
+- 静止 JPEG upload。
+- 1080p single-output full-frame JPEG。
+- CGVirtualDisplay prototype。
 
-難しい理由:
+理由:
 
-- 簡単な OSS path は private `CGVirtualDisplay` API と特殊な entitlement に依存する。
-- 再配布可能な DriverKit display path には、一般取得できない entitlement が必要な可能性がある。
-- display source の問題は USB transport の問題とは別。
+- 実機で動作確認済みの部分が多い。
+- 失敗時も timeout、I/O error、表示崩れとして観測しやすい。
 
-現実的な進め方:
+### 中
 
-- まず ScreenCaptureKit mirror。
-- 次に DeskPad 風 virtual display prototype。
-- prototype が有用で entitlement path が現実的な場合だけ DriverKit を検討する。
+- `nv12` / `yv12` raw transport。
+- software rotation。
+- dirty rect 観測。
+- full-frame JPEG 4:4:4 の tuning。
 
-#### DriverKit/System Extension による USB ownership
+理由:
 
-難しい理由:
+- path 自体は動いている。
+- ただし 60 fps の安定性、回転、画質、latency spike が絡む。
 
-- 開発中は userspace `rusb` が簡単だが、製品化では DEXT が必要になる可能性がある。
-- DEXT install、承認、signing、user-client IPC が大きな実装面積を持つ。
-- 公式 DEXT と同じ USB device を取り合う。
+### 中から高
 
-現実的な進め方:
+- type 7 JPEG tile upload。
+- fence-based queue。
+- dirty rect + rotation。
+- tile encode 並列化。
 
-- transport core はまず userspace から使える状態を維持する。
-- 必要になった時だけ、USB ownership の最小層を DriverKit に移す。
+理由:
+
+- Windows capture から形は見えているが、VRAM placement と fence の正確な意味が未確定。
+- 失敗時に表示崩れ、stale tile、decoder error、stall が起きうる。
+
+### 高
+
+- 4K `session=7` NV12 rectangle path。
+- two-output support。
+- DriverKit 化。
+
+理由:
+
+- 1080p path と別 protocol になる可能性が高い。
+- entitlement、install、VRAM allocation、multi-output scheduling の実装面積が大きい。
 
 ### 非常に高い / 初期 scope 外
 
-#### 公式 driver parity
+- 公式 driver parity。
+- audio。
+- firmware / protocol の完全仕様化。
 
-非常に難しい理由:
+理由:
 
-- 全 mode、全 port、USB2/USB3 behavior、hotplug、sleep/wake、cursor、dirty rect、error recovery、device-specific quirk が必要。
-- closed な macOS/Windows driver には Ubuntu source にない挙動が含まれる可能性がある。
+- 全 mode、USB2/USB3、hotplug、sleep/wake、cursor、audio、error recovery、device-specific quirk を含むため、回転対応付き 1080p 表示という当面の目的を超える。
 
-#### audio
+## 次の作業
 
-別扱いにすべき理由:
+次にやることは、type 7 実送信の再挑戦ではなく、Windows capture から commit 手順を詰めること。
 
-- audio は別の vendor request、session/signature、engine state、timing constraint を持つ。
-- display path の実証には不要。
-- audio と display を同時に debug すると failure mode が増えすぎる。
-
-#### protocol / firmware の完全理解
-
-良い目標ではない理由:
-
-- firmware 内部は見えない。
-- 一部 field は古い製品や未使用 path 向けの可能性がある。
-- この project に必要なのは安定した表示 path であり、歴史的 command の完全仕様ではない。
-
-実用上の最初の目標:
-
-```text
-single output -> 1080p -> USB3 -> full-frame JPEG -> software rotation
-```
-
-それが動いてから広げる対象:
-
-```text
-virtual display source -> frame pacing/fence -> 4K or dirty rects
-```
+1. Windows 1080p capture から type 7 payload の前後数十 packet を抽出する。
+2. 各 type 7 について、bulk command の `cmd_dest`、payload address、header `start_addr/end_addr`、interrupt fence ID を並べる。
+3. 複数tileが1つの画面更新を構成している箇所を探し、最後に commit / flip 相当の packet があるか確認する。
+4. `Type7JpegTilePacket` builderは残すが、Mac実機での送信は再度条件を絞るまで封印する。
+5. 実機が固まった場合は `--reset-jpeg-engine`、それでも駄目ならUSB抜き差しで復旧する。
