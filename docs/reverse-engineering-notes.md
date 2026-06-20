@@ -179,6 +179,46 @@ address は主に次の 3 zone を回る。
 - type7 の `start_addr/end_addr` は直接の画面座標ではなく、3 zone / surface とその部分範囲を指している可能性が高い。
 - 正しい再現には type7 だけでなく type4 large-update path の実装/再生も必要。
 
+### fullsnap 追加確認
+
+通常 snaplen の capture では type4 JPEG の EOI が欠け、`--salvage-eoi` で preview は作れても灰色欠けが混ざることがあった。`USBPcapCMD -s 2000000 -b 134217728` で取り直した fullsnap では、同じ fullscreen colors で全 JPEG が complete になった。
+
+`captures/type7_motion_fullscreen_colors_fullsnap.pcap`:
+
+- `type4 format=0x0d`: 24
+- `type7 format=0x0d`: 15
+- incomplete JPEG: 0
+- type4 は `1920x1080`
+- type7 は `512x1080` または `544x1080`
+
+この fullsnap 由来の type4 `30..32` の 3 zone を replay すると、灰色欠けなしで表示できた。したがって、以前の灰色欠けは T6 側の decode/flip 失敗ではなく、通常 capture の snaplen 不足で payload が欠けたことが主因と見てよい。
+
+YouTube 2秒も fullsnap で取り直した。
+
+`captures/type7_motion_youtube_2s_fullsnap.pcap`:
+
+- `type4 format=0x0d`: 52
+- `type7 format=0x0d`: 41
+- incomplete JPEG: 0
+- type4 JPEG: `1920x1080`
+- type7 JPEG: `1376x800`
+
+address zone:
+
+```text
+type4:
+0x02500430 - 0x026fe430 span=0x1fe000
+0x029556f0 - 0x02b536f0 span=0x1fe000
+0x02daa9b0 - 0x02fa89b0 span=0x1fe000
+
+type7:
+0x0253c430 - 0x0271c430 span=0x1e0000
+0x029916f0 - 0x02b716f0 span=0x1e0000
+0x02de69b0 - 0x02fc69b0 span=0x1e0000
+```
+
+type7 JPEG は fullsnap では画像として素直に復元できた。以前の「ブロック配置がランダムに見える」「YouTube から絵が取れない」問題は、少なくとも大部分が snaplen 不足による incomplete JPEG の副作用だった。
+
 ## Existing capture: `captures/mctt6.pcapng`
 
 同梱 capture を `tshark` と `tools/t6_pcap_summary.py` で確認した。
