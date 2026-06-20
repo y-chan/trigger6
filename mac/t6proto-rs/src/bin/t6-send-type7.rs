@@ -81,17 +81,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let device = T6Device::open_first()?;
+    let device = T6Device::open_first().map_err(|error| format!("open device failed: {error}"))?;
     if options.ready {
-        device.send_software_ready(1)?;
+        device
+            .send_software_ready(1)
+            .map_err(|error| format!("send software-ready failed: {error}"))?;
         println!("Sent software ready.");
     }
     if options.power_on {
-        device.set_monitor_power(1, true)?;
+        device
+            .set_monitor_power(1, true)
+            .map_err(|error| format!("send monitor power-on failed: {error}"))?;
         println!("Sent monitor power on.");
     }
     if options.reset_jpeg_engine {
-        device.reset_jpeg_engine(1)?;
+        device
+            .reset_jpeg_engine(1)
+            .map_err(|error| format!("send JPEG engine reset failed: {error}"))?;
         println!("Sent JPEG engine reset.");
     }
 
