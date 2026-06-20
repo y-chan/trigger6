@@ -534,6 +534,7 @@ cargo run --features usb --bin t6-send-type7 -- \
   --height 64 \
   --quality 90 \
   --subsamp 420 \
+  --zero-based-component-ids \
   --scan-known-addresses \
   --scan-sleep-ms 100 \
   --wait-interrupt-ms 100
@@ -555,6 +556,7 @@ cargo run --features usb --bin t6-send-type7 -- \
 
 - 白 tile がどこかに出るか。
 - 赤/緑崩れが 4:2:0 でも残るか。
+- 何も出ない場合、Windows capture と同じ `id0:2x2,id1:1x1,id2:1x1` になるよう `--zero-based-component-ids` を付けて再確認する。
 - pair ごとに描画範囲や overlay の出方が変わるか。
 - ack は返るが描画されない pair があるか。
 - 送信後にデバイスが固まる pair があるか。

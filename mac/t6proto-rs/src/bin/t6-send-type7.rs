@@ -37,6 +37,7 @@ struct Options {
     dump_header: bool,
     scan_known_addresses: bool,
     scan_sleep_ms: u64,
+    zero_based_component_ids: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,7 +49,10 @@ enum InputKind {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = parse_options()?;
-    let jpeg = build_jpeg(&options)?;
+    let mut jpeg = build_jpeg(&options)?;
+    if options.zero_based_component_ids {
+        patch_jpeg_component_ids_zero_based(&mut jpeg)?;
+    }
     let jpeg_info = parse_jpeg_info(&jpeg)?;
     println!(
         "JPEG info: marker=0x{:02x} progressive={} components={} sampling={}",
@@ -385,6 +389,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut solid_white = false;
     let mut scan_known_addresses = false;
     let mut scan_sleep_ms = 100;
+    let mut zero_based_component_ids = false;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -420,6 +425,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--scan-sleep-ms" => {
                 scan_sleep_ms = next_value(&mut args, "--scan-sleep-ms")?.parse()?
             }
+            "--zero-based-component-ids" => zero_based_component_ids = true,
             "--ready" => ready = true,
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
@@ -465,6 +471,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         dump_header,
         scan_known_addresses,
         scan_sleep_ms,
+        zero_based_component_ids,
     })
 }
 
@@ -504,6 +511,82 @@ fn encode_solid_white_to_jpeg(
     );
     let jpeg = turbojpeg::compress_image(&rgb, quality, subsamp)?;
     Ok(jpeg.to_vec())
+}
+
+fn patch_jpeg_component_ids_zero_based(jpeg: &mut [u8]) -> Result<(), Box<dyn Error>> {
+    if jpeg.len() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err("input is not a JPEG file".into());
+    }
+
+    let mut index = 2;
+    while index + 4 <= jpeg.len() {
+        while index < jpeg.len() && jpeg[index] == 0xff {
+            index += 1;
+        }
+        if index >= jpeg.len() {
+            break;
+        }
+
+        let marker = jpeg[index];
+        index += 1;
+
+        if marker == 0xd8 || marker == 0xd9 {
+            continue;
+        }
+        if index + 2 > jpeg.len() {
+            break;
+        }
+
+        let segment_len = u16::from_be_bytes([jpeg[index], jpeg[index + 1]]) as usize;
+        if segment_len < 2 || index + segment_len > jpeg.len() {
+            break;
+        }
+
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if segment_len < 8 {
+                return Err("invalid JPEG SOF segment".into());
+            }
+            let component_count = jpeg[index + 7] as usize;
+            let component_table = index + 8;
+            if component_table + component_count * 3 > index + segment_len {
+                return Err("invalid JPEG SOF component table".into());
+            }
+            for component in 0..component_count.min(3) {
+                jpeg[component_table + component * 3] = component as u8;
+            }
+        } else if marker == 0xda {
+            if segment_len < 4 {
+                return Err("invalid JPEG SOS segment".into());
+            }
+            let component_count = jpeg[index + 2] as usize;
+            let component_table = index + 3;
+            if component_table + component_count * 2 > index + segment_len {
+                return Err("invalid JPEG SOS component table".into());
+            }
+            for component in 0..component_count.min(3) {
+                jpeg[component_table + component * 2] = component as u8;
+            }
+            break;
+        }
+
+        index += segment_len;
+    }
+
+    Ok(())
 }
 
 fn next_value(
@@ -683,6 +766,8 @@ Options:\n\
     --solid-white           Generate a solid white JPEG tile instead of reading an input file\n\
     --scan-known-addresses  Send the tile to known Windows-captured start/end address pairs\n\
     --scan-sleep-ms N       Sleep between scanned address pairs, default 100\n\
+    --zero-based-component-ids\n\
+                            Rewrite generated/read JPEG SOF/SOS component ids to 0,1,2\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\
