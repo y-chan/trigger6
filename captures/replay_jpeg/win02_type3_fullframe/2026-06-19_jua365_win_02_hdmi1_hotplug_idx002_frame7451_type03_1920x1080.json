@@ -1,0 +1,41 @@
+{
+  "index": 2,
+  "pcap": "captures/2026-06-19_jua365_win_02_hdmi1_hotplug.pcapng",
+  "command": {
+    "frame": 7449,
+    "time": "16.701583000",
+    "session": 0,
+    "total_len": 67552,
+    "dest": 58416736,
+    "fragment_len": 67552,
+    "fragment_offset": 0,
+    "more_fragments": 0
+  },
+  "video": {
+    "frame": 7451,
+    "time": "16.701608000",
+    "command_frame": 7449,
+    "payload_len": 67552,
+    "type": 3,
+    "data_len": 67504,
+    "sequence": 8091,
+    "flags_or_format_hint": 6,
+    "width_field": 1920,
+    "height_field": 1920,
+    "canvas_width": null,
+    "canvas_height": null,
+    "start_addr": 12932496,
+    "end_addr": 15021456,
+    "image_format": 13,
+    "jpeg_soi_offset": 48,
+    "jpeg_width": 1920,
+    "jpeg_height": 1080,
+    "sof_marker": 192,
+    "jpeg_precision": 8,
+    "jpeg_components": "id0:2x2:q0,id1:1x1:q1,id2:1x1:q1"
+  },
+  "files": {
+    "payload": "2026-06-19_jua365_win_02_hdmi1_hotplug_idx002_frame7451_type03_1920x1080.payload.bin",
+    "jpeg": "2026-06-19_jua365_win_02_hdmi1_hotplug_idx002_frame7451_type03_1920x1080.jpg"
+  }
+}
