@@ -42,6 +42,11 @@ required-features = ["usb"]
 name = "t6-vt-jpeg-probe"
 path = "src/bin/t6-vt-jpeg-probe.rs"
 
+[[bin]]
+name = "t6-send-type7"
+path = "src/bin/t6-send-type7.rs"
+required-features = ["usb"]
+
 [dependencies]
 ffmpeg-next = { version = "8.1.0", default-features = false, features = ["codec", "format", "software-scaling"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff"] }

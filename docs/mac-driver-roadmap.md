@@ -94,6 +94,7 @@
 実装済み:
 
 - Rust protocol core に type 7 JPEG tile packet builder を追加した。
+- `t6-send-type7` を追加した。通常の virtual-display path から切り離した、1 tile だけ送る危険な実験用ツール。
 - header fields は capture 由来の layout を使う。
   - `w0 = 0x7`
   - `w1 = jpeg_len + 0x30`
@@ -111,6 +112,8 @@
 - Windows 1080p capture では、1更新が複数の type 7 tile に分割されることがある。例: `64x96`, `1824x96`, `64x1016` が約 1.6ms 内に連続する。
 - `start_addr/end_addr` は tile サイズと独立して再利用される。`0x1fe000` span の pair が多数の JPEG tile サイズに現れるため、tile-local byte range ではなく target surface / VRAM zone を示す可能性が高い。
 - pcap で見える type 7 tile の後には interrupt `event=0x04` が返る例があり、sequence/fence ack として扱う必要がありそう。
+- Mac 実機でも `VideoFlipHeader.fence_id` を非ゼロにすると interrupt packet offset `0x0c` に同じ値が返ることを確認した。
+- full-frame JPEG path では ack が1 frame程度遅れて返ることが多い。`target_data` と `last_data` の差は通常 `ack_lag=1` と見てよいが、初回や重い frame では大きくなる。
 - device stall を起こすため、type 7 実送信は安全策なしに繰り返さない。
 - 回転時は dirty rect と VRAM offset の対応が入れ替わる。
 
@@ -119,8 +122,14 @@
 - `tools/t6_type7_timeline.py` で Windows capture の type 7 周辺に出る command / interrupt / fence を時系列で見る。
 - `cmd_dest`, bulk payload address, header `start_addr/end_addr`, fence ID の関係を整理する。
 - type 7が「表示中surfaceへ直接patch」なのか、「別surface/VRAM payload zoneへuploadして別commandでcommit」なのかを切り分ける。
-- 実送信再開時は、Windows capture に近い固定 tile set から始める。単発 tile ではなく、同一 group の複数 tile + interrupt ack 待ちを再現する。
+- 実送信再開時は、Windows capture に近い固定 tile set から始める。単発 tile ではなく、同一 group の複数 tile + 1 frame 遅れの interrupt ack 確認を再現する。
 - 最初の実験は `--frames 1`、固定背景、device reset/unplug 前提、直後に `--reset-jpeg-engine` できる状態で行う。
+- `t6-send-type7` の初期値は Windows capture の代表例に寄せている。
+  - `64x1080`
+  - `canvas=1920x1920`
+  - `start=0x30`
+  - `end=0x1fe030`
+  - `payload_addr=0x02d00000`
 
 ### 4. full-frame path の安定化
 
