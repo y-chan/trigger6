@@ -675,7 +675,9 @@ struct ProfileSample {
 struct InterruptWaitSummary {
     packets: u32,
     fences: u32,
+    matched_fences: u32,
     jpeg_errors: u32,
+    target_data: u32,
     last_event: u8,
     last_data: u32,
 }
@@ -1520,6 +1522,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 device,
                 Duration::from_millis(options.wait_interrupt_ms),
                 &mut state.remaining_interrupt_dumps,
+                fence_id,
             )?)
         } else {
             None
@@ -1824,9 +1827,13 @@ fn wait_for_display_interrupts(
     device: &T6Device,
     duration: Duration,
     remaining_dumps: &mut u32,
+    target_data: u32,
 ) -> Result<InterruptWaitSummary, Box<dyn Error>> {
     let deadline = Instant::now() + duration;
-    let mut summary = InterruptWaitSummary::default();
+    let mut summary = InterruptWaitSummary {
+        target_data,
+        ..InterruptWaitSummary::default()
+    };
 
     loop {
         let now = Instant::now();
@@ -1846,6 +1853,10 @@ fn wait_for_display_interrupts(
                 summary.last_data = interrupt.display_data;
                 if interrupt.has_fence_id {
                     summary.fences = summary.fences.saturating_add(1);
+                    if interrupt.display_data == target_data {
+                        summary.matched_fences = summary.matched_fences.saturating_add(1);
+                        break;
+                    }
                 }
                 if interrupt.has_jpeg_error {
                     summary.jpeg_errors = summary.jpeg_errors.saturating_add(1);
@@ -1862,9 +1873,11 @@ fn wait_for_display_interrupts(
 fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
     match summary {
         Some(summary) => format!(
-            " interrupts={} fences={} jpeg_errors={} last_event=0x{:02x} last_data=0x{:08x}",
+            " interrupts={} fences={} matched={} target_data=0x{:08x} jpeg_errors={} last_event=0x{:02x} last_data=0x{:08x}",
             summary.packets,
             summary.fences,
+            summary.matched_fences,
+            summary.target_data,
             summary.jpeg_errors,
             summary.last_event,
             summary.last_data
