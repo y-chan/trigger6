@@ -1,0 +1,8 @@
+index,label,duration_ms,x,y,w,h,color
+1,black_start,2000,,,64,64,#ffffff
+2,full_white,1000,0,0,1920,1080,#ffffff
+3,black_between_1,1000,,,64,64,#ffffff
+4,full_red,1000,0,0,1920,1080,#ff0000
+5,full_green,1000,0,0,1920,1080,#00ff00
+6,full_blue,1000,0,0,1920,1080,#0000ff
+7,black_end,1000,,,64,64,#ffffff

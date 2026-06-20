@@ -23,6 +23,7 @@ class Step:
     y: int | None
     w: int
     h: int
+    color: str = "#ffffff"
 
 
 def xscan(tile_w: int, tile_h: int, hold_ms: int, black_ms: int) -> list[Step]:
@@ -52,6 +53,50 @@ def grid(tile_w: int, tile_h: int, hold_ms: int, black_ms: int) -> list[Step]:
     steps = [Step("black_start", black_ms, None, None, tile_w, tile_h)]
     steps += [Step(f"x{x}_y{y}", hold_ms, x, y, tile_w, tile_h) for x, y in points]
     steps.append(Step("black_end", hold_ms, None, None, tile_w, tile_h))
+    return steps
+
+
+def horizontal_bands(hold_ms: int, black_ms: int) -> list[Step]:
+    ys = [0, 56, 112, 224, 448, 728, 1016]
+    steps = [Step("black_start", black_ms, None, None, 1920, 56)]
+    steps += [Step(f"band_y{y}_1920x56", hold_ms, 0, y, 1920, 56) for y in ys]
+    steps.append(Step("black_end", hold_ms, None, None, 1920, 56))
+    return steps
+
+
+def vertical_bands(hold_ms: int, black_ms: int) -> list[Step]:
+    xs = [0, 192, 384, 768, 1152, 1536, 1728]
+    steps = [Step("black_start", black_ms, None, None, 192, 1080)]
+    steps += [Step(f"band_x{x}_192x1080", hold_ms, x, 0, 192, 1080) for x in xs]
+    steps.append(Step("black_end", hold_ms, None, None, 192, 1080))
+    return steps
+
+
+def large_rects(hold_ms: int, black_ms: int) -> list[Step]:
+    rects = [
+        ("rect_448x64_top", 0, 0, 448, 64),
+        ("rect_448x64_mid", 736, 508, 448, 64),
+        ("rect_448x64_bottom", 1472, 1016, 448, 64),
+        ("rect_1376x800_left", 0, 0, 1376, 800),
+        ("rect_1376x952_left", 0, 0, 1376, 952),
+        ("rect_1376x952_center", 272, 64, 1376, 952),
+    ]
+    steps = [Step("black_start", black_ms, None, None, 64, 64)]
+    steps += [Step(label, hold_ms, x, y, w, h) for label, x, y, w, h in rects]
+    steps.append(Step("black_end", hold_ms, None, None, 64, 64))
+    return steps
+
+
+def fullscreen_colors(hold_ms: int, black_ms: int) -> list[Step]:
+    steps = [Step("black_start", black_ms, None, None, 64, 64)]
+    steps += [
+        Step("full_white", hold_ms, 0, 0, 1920, 1080, "#ffffff"),
+        Step("black_between_1", hold_ms, None, None, 64, 64),
+        Step("full_red", hold_ms, 0, 0, 1920, 1080, "#ff0000"),
+        Step("full_green", hold_ms, 0, 0, 1920, 1080, "#00ff00"),
+        Step("full_blue", hold_ms, 0, 0, 1920, 1080, "#0000ff"),
+        Step("black_end", hold_ms, None, None, 64, 64),
+    ]
     return steps
 
 
@@ -92,7 +137,7 @@ function draw(step) {{
   ctx.fillStyle = "rgb(0,0,0)";
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
   if (step.x !== null && step.y !== null) {{
-    ctx.fillStyle = "rgb(255,255,255)";
+    ctx.fillStyle = step.color || "#ffffff";
     ctx.fillRect(step.x, step.y, step.w, step.h);
   }}
 }}
@@ -141,6 +186,7 @@ def write_pattern(
             "y": step.y,
             "w": step.w,
             "h": step.h,
+            "color": step.color,
         }
         for step in steps
     ]
@@ -156,7 +202,10 @@ def write_pattern(
         encoding="utf-8",
     )
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["index", "label", "duration_ms", "x", "y", "w", "h"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["index", "label", "duration_ms", "x", "y", "w", "h", "color"],
+        )
         writer.writeheader()
         for index, row in enumerate(rows, start=1):
             writer.writerow({"index": index, **row})
@@ -193,6 +242,34 @@ def main() -> int:
         args.out_dir,
         "type7_addr_grid_64x64",
         grid(args.tile_width, args.tile_height, args.hold_ms, args.black_ms),
+        args.width,
+        args.height,
+    )
+    write_pattern(
+        args.out_dir,
+        "type7_motion_horizontal_bands",
+        horizontal_bands(args.hold_ms, args.black_ms),
+        args.width,
+        args.height,
+    )
+    write_pattern(
+        args.out_dir,
+        "type7_motion_vertical_bands",
+        vertical_bands(args.hold_ms, args.black_ms),
+        args.width,
+        args.height,
+    )
+    write_pattern(
+        args.out_dir,
+        "type7_motion_large_rects",
+        large_rects(args.hold_ms, args.black_ms),
+        args.width,
+        args.height,
+    )
+    write_pattern(
+        args.out_dir,
+        "type7_motion_fullscreen_colors",
+        fullscreen_colors(args.hold_ms, args.black_ms),
         args.width,
         args.height,
     )

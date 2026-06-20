@@ -1,0 +1,9 @@
+index,label,duration_ms,x,y,w,h,color
+1,black_start,2000,,,64,64,#ffffff
+2,rect_448x64_top,1000,0,0,448,64,#ffffff
+3,rect_448x64_mid,1000,736,508,448,64,#ffffff
+4,rect_448x64_bottom,1000,1472,1016,448,64,#ffffff
+5,rect_1376x800_left,1000,0,0,1376,800,#ffffff
+6,rect_1376x952_left,1000,0,0,1376,952,#ffffff
+7,rect_1376x952_center,1000,272,64,1376,952,#ffffff
+8,black_end,1000,,,64,64,#ffffff

@@ -17,3 +17,12 @@ __pycache__/
 *.py[cod]
 mac/t6proto/build/
 mac/t6proto-rs/target/
+
+# Generated capture images and local visual reports
+*.jpg
+*.jpeg
+*.png
+captures/*_jpegs/
+captures/*_reassembled/
+captures/*_reassembled.csv
+captures/*_reassembled.html

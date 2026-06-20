@@ -1,0 +1,10 @@
+index,label,duration_ms,x,y,w,h,color
+1,black_start,2000,,,192,1080,#ffffff
+2,band_x0_192x1080,1000,0,0,192,1080,#ffffff
+3,band_x192_192x1080,1000,192,0,192,1080,#ffffff
+4,band_x384_192x1080,1000,384,0,192,1080,#ffffff
+5,band_x768_192x1080,1000,768,0,192,1080,#ffffff
+6,band_x1152_192x1080,1000,1152,0,192,1080,#ffffff
+7,band_x1536_192x1080,1000,1536,0,192,1080,#ffffff
+8,band_x1728_192x1080,1000,1728,0,192,1080,#ffffff
+9,black_end,1000,,,192,1080,#ffffff

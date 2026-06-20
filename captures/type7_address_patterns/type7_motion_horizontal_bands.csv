@@ -1,0 +1,10 @@
+index,label,duration_ms,x,y,w,h,color
+1,black_start,2000,,,1920,56,#ffffff
+2,band_y0_1920x56,1000,0,0,1920,56,#ffffff
+3,band_y56_1920x56,1000,0,56,1920,56,#ffffff
+4,band_y112_1920x56,1000,0,112,1920,56,#ffffff
+5,band_y224_1920x56,1000,0,224,1920,56,#ffffff
+6,band_y448_1920x56,1000,0,448,1920,56,#ffffff
+7,band_y728_1920x56,1000,0,728,1920,56,#ffffff
+8,band_y1016_1920x56,1000,0,1016,1920,56,#ffffff
+9,black_end,1000,,,1920,56,#ffffff
