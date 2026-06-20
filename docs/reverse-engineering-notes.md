@@ -219,6 +219,34 @@ type7:
 
 type7 JPEG は fullsnap では画像として素直に復元できた。以前の「ブロック配置がランダムに見える」「YouTube から絵が取れない」問題は、少なくとも大部分が snaplen 不足による incomplete JPEG の副作用だった。
 
+YouTube fullsnap の replay は、`tools/t6_reassemble_video.py --export-payloads` で生成した manifest を `t6-send-type7 --replay-manifest-json` に渡せば type4/type7 混在シーケンスをそのまま送れる。
+
+生成例:
+
+```sh
+python3 tools/t6_reassemble_video.py captures/type7_motion_youtube_2s_fullsnap.pcap \
+  --summary-only \
+  --export-payloads /tmp/t6-youtube-fullsnap-replay \
+  --salvage-eoi
+```
+
+replay 例:
+
+```sh
+cargo run --features usb --bin t6-send-type7 -- \
+  --replay-manifest-json /tmp/t6-youtube-fullsnap-replay/type7_motion_youtube_2s_fullsnap_manifest.json \
+  --replay-record-start 1 \
+  --replay-record-end 6 \
+  --replay-sequence-start 1000 \
+  --replay-payload-addr 0x02800000 \
+  --ready \
+  --power-on \
+  --wait-interrupt-ms 200 \
+  --scan-sleep-ms 20
+```
+
+まずは短い範囲で試す。YouTube frame は payload が大きく、`0x02800000` から 12 record 送るだけでも `cmd_dest` は `0x02df...` 付近まで進む。全 93 record を一気に送ると payload ring を大きく進めるため、VRAM command 領域との関係を見ながら `1..6`, `7..12` のように分けて試す。
+
 ## Existing capture: `captures/mctt6.pcapng`
 
 同梱 capture を `tshark` と `tools/t6_pcap_summary.py` で確認した。
