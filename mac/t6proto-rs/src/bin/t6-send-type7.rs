@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         fs::read(&options.input_path)?
     };
+    let jpeg_info = parse_jpeg_info(&jpeg)?;
     let packet = Type7JpegTilePacket::new(
         &jpeg,
         options.payload_addr,
@@ -87,6 +88,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         let header_len = t6proto::TYPE7_JPEG_TILE_HEADER_SIZE;
         println!("type7_header={}", hex_bytes(&packet.payload[..header_len]));
     }
+    println!(
+        "JPEG info: marker=0x{:02x} progressive={} components={} sampling={}",
+        jpeg_info.sof_marker,
+        jpeg_info.is_progressive,
+        jpeg_info.components.len(),
+        jpeg_info.sampling_summary()
+    );
 
     if options.dry_run {
         println!("Dry run; type7 tile was not sent.");
@@ -376,6 +384,118 @@ fn parse_subsampling(value: &str) -> Result<Subsamp, Box<dyn Error>> {
         "444" => Ok(Subsamp::None),
         _ => Err("--subsamp must be one of 420, 422, 444".into()),
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JpegInfo {
+    width: u16,
+    height: u16,
+    sof_marker: u8,
+    is_progressive: bool,
+    components: Vec<JpegComponent>,
+}
+
+impl JpegInfo {
+    fn sampling_summary(&self) -> String {
+        self.components
+            .iter()
+            .map(|component| {
+                format!(
+                    "id{}:{}x{}",
+                    component.id, component.h_sampling, component.v_sampling
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct JpegComponent {
+    id: u8,
+    h_sampling: u8,
+    v_sampling: u8,
+}
+
+fn parse_jpeg_info(jpeg: &[u8]) -> Result<JpegInfo, Box<dyn Error>> {
+    if jpeg.len() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err("input is not a JPEG file".into());
+    }
+
+    let mut index = 2;
+    while index + 4 <= jpeg.len() {
+        while index < jpeg.len() && jpeg[index] == 0xff {
+            index += 1;
+        }
+        if index >= jpeg.len() {
+            break;
+        }
+
+        let marker = jpeg[index];
+        index += 1;
+
+        if marker == 0xd8 || marker == 0xd9 {
+            continue;
+        }
+        if index + 2 > jpeg.len() {
+            break;
+        }
+
+        let segment_len = u16::from_be_bytes([jpeg[index], jpeg[index + 1]]) as usize;
+        if segment_len < 2 || index + segment_len > jpeg.len() {
+            break;
+        }
+
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if segment_len < 7 {
+                break;
+            }
+            let height = u16::from_be_bytes([jpeg[index + 3], jpeg[index + 4]]);
+            let width = u16::from_be_bytes([jpeg[index + 5], jpeg[index + 6]]);
+            let component_count = jpeg[index + 7] as usize;
+            let mut components = Vec::with_capacity(component_count);
+            let mut component_index = index + 8;
+
+            for _ in 0..component_count {
+                if component_index + 3 > index + segment_len {
+                    return Err("invalid JPEG SOF component table".into());
+                }
+                let sampling = jpeg[component_index + 1];
+                components.push(JpegComponent {
+                    id: jpeg[component_index],
+                    h_sampling: sampling >> 4,
+                    v_sampling: sampling & 0x0f,
+                });
+                component_index += 3;
+            }
+
+            return Ok(JpegInfo {
+                width,
+                height,
+                sof_marker: marker,
+                is_progressive: matches!(marker, 0xc2 | 0xc6 | 0xca | 0xce),
+                components,
+            });
+        }
+
+        index += segment_len;
+    }
+
+    Err("could not find JPEG dimensions".into())
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
