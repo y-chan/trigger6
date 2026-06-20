@@ -41,6 +41,21 @@ capture 中は個人情報や通知を出さない。外部ディスプレイに
 
 HTML でも小さい native app でもよい。重要なのは、黒背景上に単色矩形を段階的に表示すること。
 
+address 対応に集中する場合は、リポジトリ側でテスト HTML を生成できる。
+
+```sh
+python3 tools/generate_type7_address_patterns.py
+```
+
+生成物:
+
+- `captures/type7_address_patterns/type7_addr_xscan_64x64.html`
+- `captures/type7_address_patterns/type7_addr_yscan_64x64.html`
+- `captures/type7_address_patterns/type7_addr_grid_64x64.html`
+- 各 HTML と同名の `.csv`
+
+Windows 側では HTML を JUA365 側ディスプレイに置き、クリックまたは Space で開始する。画面には黒背景と白い矩形だけが出る。`.csv` は各 step の位置と停止時間の対応表として、pcap と一緒に保存する。
+
 ### Capture A: 小さい矩形の位置対応
 
 推奨パターン:
