@@ -233,19 +233,33 @@ python3 tools/t6_reassemble_video.py captures/type7_motion_youtube_2s_fullsnap.p
 replay 例:
 
 ```sh
-cargo run --features usb --bin t6-send-type7 -- \
-  --replay-manifest-json /tmp/t6-youtube-fullsnap-replay/type7_motion_youtube_2s_fullsnap_manifest.json \
-  --replay-record-start 1 \
-  --replay-record-end 6 \
-  --replay-sequence-start 1000 \
-  --replay-payload-addr 0x02800000 \
+cargo run --features usb --bin t6-replay-video -- \
+  --manifest /tmp/t6-youtube-fullsnap-replay/type7_motion_youtube_2s_fullsnap_manifest.json \
+  --record-start 1 \
+  --record-end 6 \
+  --sequence-start 1000 \
   --ready \
   --power-on \
   --wait-interrupt-ms 200 \
-  --scan-sleep-ms 20
+  --sleep-ms 20
 ```
 
-まずは短い範囲で試す。YouTube frame は payload が大きく、`0x02800000` から 12 record 送るだけでも `cmd_dest` は `0x02df...` 付近まで進む。全 93 record を一気に送ると payload ring を大きく進めるため、VRAM command 領域との関係を見ながら `1..6`, `7..12` のように分けて試す。
+まずは短い範囲で試す。`t6-replay-video` は指定しなければ capture 元の `cmd_dest` をそのまま使う。`--payload-addr` で詰め直すこともできるが、YouTube frame は payload が大きく、`0x02800000` から 12 record 送るだけでも `cmd_dest` は `0x02df...` 付近まで進む。全 93 record を一気に送ると payload ring を大きく進めるため、VRAM command 領域との関係を見ながら `1..6`, `7..12` のように分けて試す。
+
+type4 の直後に対応する type7 を送る最小確認:
+
+```sh
+cargo run --features usb --bin t6-replay-video -- \
+  --manifest /tmp/t6-youtube-fullsnap-replay/type7_motion_youtube_2s_fullsnap_manifest.json \
+  --record-start 6 \
+  --record-end 7 \
+  --sequence-start 7000 \
+  --max-packet 0x8000 \
+  --ready \
+  --power-on \
+  --wait-interrupt-ms 100 \
+  --sleep-ms 50
+```
 
 ## Existing capture: `captures/mctt6.pcapng`
 

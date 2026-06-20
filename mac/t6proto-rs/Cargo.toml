@@ -47,6 +47,11 @@ name = "t6-send-type7"
 path = "src/bin/t6-send-type7.rs"
 required-features = ["usb"]
 
+[[bin]]
+name = "t6-replay-video"
+path = "src/bin/t6-replay-video.rs"
+required-features = ["usb"]
+
 [dependencies]
 ffmpeg-next = { version = "8.1.0", default-features = false, features = ["codec", "format", "software-scaling"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff"] }
