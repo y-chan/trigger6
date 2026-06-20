@@ -108,15 +108,19 @@
 
 - type 7 header の形だけでは不十分。tile後に必要な flip/fence/commit 手順、または target surface の選び方が未解明。
 - `w6/w7` は単純な screen coordinate ではなく、VRAM allocator / surface state / fence と結びついている可能性が高い。
+- Windows 1080p capture では、1更新が複数の type 7 tile に分割されることがある。例: `64x96`, `1824x96`, `64x1016` が約 1.6ms 内に連続する。
+- `start_addr/end_addr` は tile サイズと独立して再利用される。`0x1fe000` span の pair が多数の JPEG tile サイズに現れるため、tile-local byte range ではなく target surface / VRAM zone を示す可能性が高い。
+- pcap で見える type 7 tile の後には interrupt `event=0x04` が返る例があり、sequence/fence ack として扱う必要がありそう。
 - device stall を起こすため、type 7 実送信は安全策なしに繰り返さない。
 - 回転時は dirty rect と VRAM offset の対応が入れ替わる。
 
 次に必要なこと:
 
-- Windows capture の type 7 周辺で、tile payload の前後に出る command / interrupt / fence を時系列で見る。
+- `tools/t6_type7_timeline.py` で Windows capture の type 7 周辺に出る command / interrupt / fence を時系列で見る。
 - `cmd_dest`, bulk payload address, header `start_addr/end_addr`, fence ID の関係を整理する。
 - type 7が「表示中surfaceへ直接patch」なのか、「別surface/VRAM payload zoneへuploadして別commandでcommit」なのかを切り分ける。
-- 実送信再開時は、1枚だけ、固定tileだけ、`--frames 1`、直後に `--reset-jpeg-engine` できる状態で行う。
+- 実送信再開時は、Windows capture に近い固定 tile set から始める。単発 tile ではなく、同一 group の複数 tile + interrupt ack 待ちを再現する。
+- 最初の実験は `--frames 1`、固定背景、device reset/unplug 前提、直後に `--reset-jpeg-engine` できる状態で行う。
 
 ### 4. full-frame path の安定化
 

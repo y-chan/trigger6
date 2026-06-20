@@ -464,6 +464,10 @@ note: 4K display only.
 - interrupt はほぼ `flags=0x04 event=0x04` で、`value` は `0x21b8`, `0x21b9`, ... のように増える。fence ID 仮説と整合する。
 - `2026-06-19_jua365_win_03_resolution_change.pcapng` は resolution change attempt。capture 内には `0x12` detailed timing や `0x08` set resolution by index は出ていない。control transfer も descriptor/config 系だけで、Windows driver がモード変更を vendor control request として流している様子はこの capture には見えない。
 - 同 capture の video tile は全て `canvas=1920x1920`。前半は `64x1080` の縦 tile が中心で、32s 付近に `1216x192`, `320x224`, `64x288` などの小さい dirty update がまとまって出る。これは Windows の設定画面/確認 UI の描画変化を反映した可能性が高く、出力 timing の切替そのものを示す packet はまだ特定できていない。
+- `tools/t6_type7_timeline.py` で type 7 tile を pcap/session/sequence ごとに時系列 grouping できるようにした。`captures/1080p_video_headers.csv` は複数 pcap の行を含むため、時刻だけで grouping すると別 capture が混ざる。
+- Windows 1080p capture の type 7 tile は、1更新が複数 tile で構成されることがある。例: `64x96`, `1824x96`, `64x1016` の3 tile が約 1.6ms 内に連続し、同一の上帯/中央帯/左帯のような dirty 分割に見える。
+- `start_addr/end_addr` は tile JPEG の byte range や画面座標から単純に計算できる値ではない。同じ `start=0x18aaaf0 end=0x1aa8af0 span=0x1fe000` が `64x64`, `64x96`, `64x544`, `64x1080`, `128x576` など複数サイズで再利用される。したがって、この2値は tile-local offset ではなく、surface / VRAM allocation / decoder target zone の状態を指す可能性が高い。
+- `captures/mctt6.pcapng` の type 7 は少数だが、tile 直後 1-数 ms に interrupt `flags=0x04 event=0x04 value=<sequence相当>` が返る例がある。type 7 実送信には JPEG header だけでなく、この ack/fence と target surface state の扱いが必要な可能性が高い。
 - 4K + 1080p 混在 capture は巨大なため、先頭/中盤を `editcap` で切り出して解析した。control transfer 側では `0x10` timing/read 系が `wValue=0..4` に対して繰り返し出ており、単一出力時より多くの output/timing slot を見ている。`0x80` EDID read は output 0/1 で確認できる。
 - 同 capture の中盤切り出しでは、拾えた video payload は `type=0x4 format=0x0d jpeg=1920x1080` と `type=0x7 format=0x0d jpeg=1920x736`。現時点の parser で見えている video stream は 4K full frame ではなく、1080p 系の面を送っているように見える。4K 側が別 session / 別 header layout / 別 output slot で流れている可能性が残る。
 - 4K only capture では `session=7` の bulk command が継続的に出る。既存の 1080p/JPEG path と違い、command 直後の payload は `6144` bytes や `1044480` bytes の大きな blob で、JPEG SOI は見えない。例:
