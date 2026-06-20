@@ -44,6 +44,9 @@ struct Options {
     replay_group: usize,
     replay_manifest_json: Option<PathBuf>,
     replay_record: Option<usize>,
+    replay_type: Option<u32>,
+    replay_sequence_start: Option<u32>,
+    replay_payload_addr: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -421,6 +424,9 @@ fn replay_manifest_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn
             options
                 .replay_record
                 .is_none_or(|index| record.index == index)
+                && options
+                    .replay_type
+                    .is_none_or(|video_type| record.video.video_type == video_type)
         })
         .collect::<Vec<_>>();
     if selected.is_empty() {
@@ -460,11 +466,17 @@ fn replay_manifest_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn
         }
     }
 
+    let mut replay_sequence = options.replay_sequence_start;
+    let mut replay_payload_addr = options.replay_payload_addr;
+
     for (selected_index, record) in selected.iter().enumerate() {
         let payload_path = base_dir.join(&record.files.payload);
-        let payload = fs::read(&payload_path)?;
-        let cmd_dest = record.command.dest;
-        let sequence = record.video.sequence;
+        let mut payload = fs::read(&payload_path)?;
+        let cmd_dest = replay_payload_addr.unwrap_or(record.command.dest);
+        let sequence = replay_sequence.unwrap_or(record.video.sequence);
+        if replay_sequence.is_some() {
+            patch_payload_sequence(&mut payload, sequence)?;
+        }
         if payload.len() != record.command.total_len as usize {
             println!(
                 "warning: record {} payload_len={} command.total_len={}",
@@ -499,11 +511,26 @@ fn replay_manifest_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn
             send_raw_payload(device, options, cmd_dest, sequence, &payload)?;
         }
 
+        if let Some(current) = replay_sequence {
+            replay_sequence = Some(current.wrapping_add(1));
+        }
+        if let Some(current) = replay_payload_addr {
+            replay_payload_addr = Some(next_ring_addr(current, payload.len()));
+        }
+
         if options.scan_sleep_ms > 0 && selected_index + 1 < selected.len() {
             thread::sleep(Duration::from_millis(options.scan_sleep_ms));
         }
     }
 
+    Ok(())
+}
+
+fn patch_payload_sequence(payload: &mut [u8], sequence: u32) -> Result<(), Box<dyn Error>> {
+    if payload.len() < 12 {
+        return Err("payload is too small to patch sequence".into());
+    }
+    payload[8..12].copy_from_slice(&sequence.to_le_bytes());
     Ok(())
 }
 
@@ -768,6 +795,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut replay_group = 1;
     let mut replay_manifest_json = None;
     let mut replay_record = None;
+    let mut replay_type = None;
+    let mut replay_sequence_start = None;
+    let mut replay_payload_addr = None;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -819,6 +849,19 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             }
             "--replay-record" => {
                 replay_record = Some(next_value(&mut args, "--replay-record")?.parse()?)
+            }
+            "--replay-type" => {
+                replay_type = Some(parse_u32(&next_value(&mut args, "--replay-type")?)?)
+            }
+            "--replay-sequence-start" => {
+                replay_sequence_start = Some(parse_u32(&next_value(
+                    &mut args,
+                    "--replay-sequence-start",
+                )?)?)
+            }
+            "--replay-payload-addr" => {
+                replay_payload_addr =
+                    Some(parse_u32(&next_value(&mut args, "--replay-payload-addr")?)?)
             }
             "--ready" => ready = true,
             "--power-on" => power_on = true,
@@ -877,6 +920,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         replay_group,
         replay_manifest_json,
         replay_record,
+        replay_type,
+        replay_sequence_start,
+        replay_payload_addr,
     })
 }
 
@@ -1180,6 +1226,10 @@ Options:\n\
                             Replay raw JPEG video records from captures/replay_jpeg manifest JSON\n\
                             or tools/t6_reassemble_video.py --export-payloads output\n\
     --replay-record N       Optional manifest record index to replay\n\
+    --replay-type N         Optional video type filter for manifest replay, e.g. 4 or 7\n\
+    --replay-sequence-start N\n\
+                            Rewrite replay payload sequence/fence ids starting at N\n\
+    --replay-payload-addr N Rewrite replay bulk payload address and advance as a ring\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before tile\n\
