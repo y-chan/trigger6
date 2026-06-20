@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>type7_partial_modal_fade</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #111316;
+      cursor: none;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #111316;
+    }
+  </style>
+</head>
+<body>
+<canvas id="pattern" width="1920" height="1080"></canvas>
+<script>
+const WIDTH = 1920;
+const HEIGHT = 1080;
+const FPS = 60;
+const canvas = document.getElementById("pattern");
+const ctx = canvas.getContext("2d", { alpha: false });
+let running = false;
+
+const MODALS = [
+  { label: "center_small", x: 660, y: 330, w: 600, h: 360 },
+  { label: "center_wide", x: 510, y: 260, w: 900, h: 500 },
+  { label: "right_sheet", x: 1250, y: 96, w: 520, h: 888 },
+  { label: "bottom_toast", x: 560, y: 750, w: 800, h: 180 }
+];
+
+function ease(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+function drawRoundedRect(x, y, w, h, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawBackground() {
+  ctx.fillStyle = "#111316";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  ctx.fillStyle = "#1c2026";
+  ctx.fillRect(0, 0, WIDTH, 72);
+  ctx.fillStyle = "#2b313a";
+  for (let x = 32; x < WIDTH - 32; x += 180) {
+    ctx.fillRect(x, 24, 112, 20);
+  }
+  ctx.fillStyle = "#171a1f";
+  for (let y = 116; y < HEIGHT - 80; y += 126) {
+    drawRoundedRect(96, y, 520, 76, 8, "#20252c", "#2d3440");
+    drawRoundedRect(680, y, 520, 76, 8, "#20252c", "#2d3440");
+    drawRoundedRect(1264, y, 520, 76, 8, "#20252c", "#2d3440");
+  }
+  ctx.fillStyle = "#d5d9e0";
+  ctx.font = "24px monospace";
+  ctx.fillText("type7_partial_modal_fade fixed app shell", 28, 116);
+}
+
+function drawModal(modal, progress, phaseLabel, frame) {
+  drawBackground();
+  const alpha = progress * 0.52;
+  ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+  const scale = 0.96 + 0.04 * progress;
+  const slide = Math.round((1 - progress) * 28);
+  const cx = modal.x + modal.w / 2;
+  const cy = modal.y + modal.h / 2;
+  const x = Math.round(cx - modal.w * scale / 2);
+  const y = Math.round(cy - modal.h * scale / 2 + slide);
+  const w = Math.round(modal.w * scale);
+  const h = Math.round(modal.h * scale);
+  drawRoundedRect(x, y, w, h, 10, "#f5f7fb", "#ffffff");
+  ctx.fillStyle = "#111316";
+  ctx.font = "34px monospace";
+  ctx.fillText("Modal transition", x + 34, y + 70);
+  ctx.fillStyle = "#4a5568";
+  ctx.font = "24px monospace";
+  ctx.fillText(`${modal.label} ${phaseLabel} frame=${frame}`, x + 34, y + 116);
+  ctx.fillStyle = "#e4e8ef";
+  for (let i = 0; i < 5; i++) {
+    ctx.fillRect(x + 34, y + 160 + i * 42, Math.max(120, w - 68 - i * 36), 18);
+  }
+  drawRoundedRect(x + w - 176, y + h - 72, 128, 42, 8, "#2563eb", "#1d4ed8");
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "22px monospace";
+  ctx.fillText("OK", x + w - 130, y + h - 44);
+  console.log("frame", frame, "modal", modal.label, "progress", progress.toFixed(3), "bbox", x, y, w, h);
+}
+
+async function animateModal(modal, frame) {
+  console.log("segment", modal.label, modal.x, modal.y, modal.w, modal.h);
+  const fadeFrames = 45;
+  const holdFrames = 45;
+  for (let i = 0; i < fadeFrames; i++) {
+    drawModal(modal, ease(i / (fadeFrames - 1)), "fade_in", frame++);
+    await new Promise(resolve => setTimeout(resolve, 1000 / FPS));
+  }
+  for (let i = 0; i < holdFrames; i++) {
+    drawModal(modal, 1, "hold", frame++);
+    await new Promise(resolve => setTimeout(resolve, 1000 / FPS));
+  }
+  for (let i = 0; i < fadeFrames; i++) {
+    drawModal(modal, 1 - ease(i / (fadeFrames - 1)), "fade_out", frame++);
+    await new Promise(resolve => setTimeout(resolve, 1000 / FPS));
+  }
+  drawBackground();
+  await new Promise(resolve => setTimeout(resolve, 500));
+  return frame;
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  if (document.documentElement.requestFullscreen) {
+    try { await document.documentElement.requestFullscreen(); } catch (_) {}
+  }
+  console.log("type7-partial-modal-fade-start", new Date().toISOString());
+  let frame = 0;
+  for (const modal of MODALS) {
+    frame = await animateModal(modal, frame);
+  }
+  drawBackground();
+  console.log("type7-partial-modal-fade-done", new Date().toISOString());
+  running = false;
+}
+
+drawBackground();
+window.addEventListener("keydown", event => {
+  if (event.code === "Space" || event.code === "Enter") run();
+});
+window.addEventListener("pointerdown", run);
+</script>
+</body>
+</html>
