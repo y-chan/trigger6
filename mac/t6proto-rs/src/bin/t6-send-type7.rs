@@ -44,6 +44,8 @@ struct Options {
     replay_group: usize,
     replay_manifest_json: Option<PathBuf>,
     replay_record: Option<usize>,
+    replay_record_start: Option<usize>,
+    replay_record_end: Option<usize>,
     replay_type: Option<u32>,
     replay_sequence_start: Option<u32>,
     replay_payload_addr: Option<u32>,
@@ -425,6 +427,12 @@ fn replay_manifest_json(options: &Options, path: &PathBuf) -> Result<(), Box<dyn
                 .replay_record
                 .is_none_or(|index| record.index == index)
                 && options
+                    .replay_record_start
+                    .is_none_or(|start| record.index >= start)
+                && options
+                    .replay_record_end
+                    .is_none_or(|end| record.index <= end)
+                && options
                     .replay_type
                     .is_none_or(|video_type| record.video.video_type == video_type)
         })
@@ -795,6 +803,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut replay_group = 1;
     let mut replay_manifest_json = None;
     let mut replay_record = None;
+    let mut replay_record_start = None;
+    let mut replay_record_end = None;
     let mut replay_type = None;
     let mut replay_sequence_start = None;
     let mut replay_payload_addr = None;
@@ -849,6 +859,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             }
             "--replay-record" => {
                 replay_record = Some(next_value(&mut args, "--replay-record")?.parse()?)
+            }
+            "--replay-record-start" => {
+                replay_record_start = Some(next_value(&mut args, "--replay-record-start")?.parse()?)
+            }
+            "--replay-record-end" => {
+                replay_record_end = Some(next_value(&mut args, "--replay-record-end")?.parse()?)
             }
             "--replay-type" => {
                 replay_type = Some(parse_u32(&next_value(&mut args, "--replay-type")?)?)
@@ -920,6 +936,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         replay_group,
         replay_manifest_json,
         replay_record,
+        replay_record_start,
+        replay_record_end,
         replay_type,
         replay_sequence_start,
         replay_payload_addr,
@@ -1226,6 +1244,8 @@ Options:\n\
                             Replay raw JPEG video records from captures/replay_jpeg manifest JSON\n\
                             or tools/t6_reassemble_video.py --export-payloads output\n\
     --replay-record N       Optional manifest record index to replay\n\
+    --replay-record-start N Optional first manifest record index to replay\n\
+    --replay-record-end N   Optional last manifest record index to replay\n\
     --replay-type N         Optional video type filter for manifest replay, e.g. 4 or 7\n\
     --replay-sequence-start N\n\
                             Rewrite replay payload sequence/fence ids starting at N\n\
