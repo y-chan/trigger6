@@ -1150,7 +1150,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "Usage: t6-send-type7 (--jpeg tile.jpg | --image image.png | --solid-white) [options]\n\
+        "Usage: t6-send-type7 (--jpeg tile.jpg | --image image.png | --solid-white | --replay-manifest-json manifest.json) [options]\n\
 Options:\n\
     --width N               Tile width, default 64\n\
     --height N              Tile height, default 1080\n\
@@ -1177,7 +1177,8 @@ Options:\n\
                             Replay a group exported by tools/t6_type7_timeline.py\n\
     --replay-group N        1-based group index for --replay-groups-json, default 1\n\
     --replay-manifest-json PATH\n\
-                            Replay records from captures/replay_jpeg manifest JSON\n\
+                            Replay raw JPEG video records from captures/replay_jpeg manifest JSON\n\
+                            or tools/t6_reassemble_video.py --export-payloads output\n\
     --replay-record N       Optional manifest record index to replay\n\
     --ready                 Send software-ready before tile\n\
     --power-on              Send monitor power-on before tile\n\

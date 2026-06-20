@@ -7,7 +7,9 @@ import argparse
 import collections
 import csv
 import html
+import json
 import pathlib
+import re
 
 from t6_pcap_summary import (
     DEFAULT_BULK_OUT,
@@ -63,6 +65,10 @@ def trim_trailing_zeroes(data: bytes) -> bytes:
     return data[: last + 1]
 
 
+def safe_stem(path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", pathlib.Path(path).stem)
+
+
 def summarize_reassembled(args: argparse.Namespace) -> int:
     packets = load_packets(args.pcap, tshark_path(args.tshark))
     pending_command: BulkCommand | None = None
@@ -108,6 +114,12 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
     out_dir = args.export_jpegs
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
+    payload_dir = args.export_payloads
+    if payload_dir:
+        payload_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_records: list[dict[str, object]] = []
+    stem = safe_stem(args.pcap)
 
     for index, assembly in enumerate(complete, start=1):
         packet = UsbPacket(
@@ -156,15 +168,25 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
             )
 
         exported_name = ""
+        payload_name = ""
+        jpeg_name = ""
         salvaged = False
-        if out_dir and header.jpeg_soi_offset >= 0:
+        payload = bytes(packet.capdata)
+        if payload_dir and header.jpeg_soi_offset >= 0:
+            prefix = (
+                f"{stem}_idx{index:04d}_frame{assembly.last_command.frame}_"
+                f"type{header.video_type:02x}_{header.jpeg_width}x{header.jpeg_height}"
+            )
+            payload_name = f"{prefix}.payload.bin"
+            (payload_dir / payload_name).write_bytes(payload)
+
+        jpeg = b""
+        if (out_dir or payload_dir) and header.jpeg_soi_offset >= 0:
             if eoi is not None:
                 jpeg = packet.capdata[header.jpeg_soi_offset:eoi]
             elif args.salvage_eoi:
                 jpeg = trim_trailing_zeroes(packet.capdata[header.jpeg_soi_offset:]) + b"\xff\xd9"
                 salvaged = True
-            else:
-                jpeg = b""
             if jpeg:
                 suffix = "_salvaged" if salvaged else ""
                 name = (
@@ -172,9 +194,63 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
                     f"frame{assembly.last_command.frame}_type{header.video_type:02x}_"
                     f"{header.jpeg_width}x{header.jpeg_height}{suffix}.jpg"
                 )
-                (out_dir / name).write_bytes(jpeg)
-                exported_name = name
-                exported += 1
+                if out_dir:
+                    (out_dir / name).write_bytes(jpeg)
+                    exported_name = name
+                    exported += 1
+                if payload_dir:
+                    jpeg_name = f"{prefix}{suffix}.jpg"
+                    (payload_dir / jpeg_name).write_bytes(jpeg)
+
+        if payload_dir and header.jpeg_soi_offset >= 0:
+            metadata = {
+                "index": index,
+                "pcap": args.pcap,
+                "command": {
+                    "frame": assembly.first_command.frame,
+                    "time": assembly.first_command.time,
+                    "session": assembly.first_command.session,
+                    "total_len": assembly.first_command.total_len,
+                    "dest": assembly.first_command.dest,
+                    "fragment_len": assembly.first_command.fragment_len,
+                    "fragment_offset": assembly.first_command.fragment_offset,
+                    "more_fragments": assembly.first_command.more_fragments,
+                    "last_frame": assembly.last_command.frame,
+                    "fragments": assembly.fragments,
+                },
+                "video": {
+                    "frame": assembly.last_command.frame,
+                    "time": assembly.last_command.time,
+                    "command_frame": assembly.first_command.frame,
+                    "payload_len": len(payload),
+                    "type": header.video_type,
+                    "data_len": header.data_len,
+                    "sequence": header.sequence,
+                    "flags_or_format_hint": header.flags_or_format_hint,
+                    "width_field": header.width_field,
+                    "height_field": header.height_field,
+                    "canvas_width": header.canvas_width,
+                    "canvas_height": header.canvas_height,
+                    "start_addr": header.start_addr,
+                    "end_addr": header.end_addr,
+                    "image_format": header.image_format,
+                    "jpeg_soi_offset": header.jpeg_soi_offset,
+                    "jpeg_width": header.jpeg_width,
+                    "jpeg_height": header.jpeg_height,
+                    "sof_marker": header.sof_marker,
+                    "jpeg_precision": header.jpeg_precision,
+                    "jpeg_components": header.jpeg_components,
+                    "complete": eoi is not None,
+                    "salvaged": salvaged,
+                },
+                "files": {
+                    "payload": payload_name,
+                    "jpeg": jpeg_name,
+                },
+            }
+            meta_name = f"{prefix}.json"
+            (payload_dir / meta_name).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            manifest_records.append(metadata)
 
         rows.append(
             {
@@ -235,6 +311,16 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
     if args.report_html:
         args.report_html.parent.mkdir(parents=True, exist_ok=True)
         args.report_html.write_text(render_html_report(args.pcap, rows), encoding="utf-8")
+
+    if payload_dir:
+        manifest = {
+            "pcap": args.pcap,
+            "count": len(manifest_records),
+            "records": manifest_records,
+        }
+        manifest_path = payload_dir / f"{stem}_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        print(f"manifest\t{manifest_path}\tcount={len(manifest_records)}")
 
     print("# reassembly_summary")
     print(f"packets\t{len(packets)}")
@@ -322,6 +408,7 @@ def main() -> int:
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--export-jpegs", type=pathlib.Path)
+    parser.add_argument("--export-payloads", type=pathlib.Path)
     parser.add_argument("--salvage-eoi", action="store_true")
     parser.add_argument("--report-csv", type=pathlib.Path)
     parser.add_argument("--report-html", type=pathlib.Path)
