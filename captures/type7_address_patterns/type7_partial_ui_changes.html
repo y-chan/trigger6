@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>type7_partial_ui_changes</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #151515;
+      cursor: none;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #151515;
+    }
+  </style>
+</head>
+<body>
+<canvas id="pattern" width="1920" height="1080"></canvas>
+<script>
+const WIDTH = 1920;
+const HEIGHT = 1080;
+const canvas = document.getElementById("pattern");
+const ctx = canvas.getContext("2d", { alpha: false });
+let running = false;
+
+const STEPS = [
+  { label: "esc_hint_top_left", x: 24, y: 24, w: 360, h: 72, color: "#ffffff", text: "Press Esc to exit" },
+  { label: "tooltip_center", x: 760, y: 480, w: 400, h: 96, color: "#ffdf5a", text: "Small tooltip" },
+  { label: "menu_top", x: 0, y: 0, w: 1920, h: 48, color: "#4cc9f0", text: "Top menu bar change" },
+  { label: "toast_bottom_right", x: 1420, y: 930, w: 460, h: 96, color: "#80ed99", text: "Notification" },
+  { label: "caret_blink", x: 914, y: 520, w: 16, h: 80, color: "#ffffff", text: "" },
+  { label: "thin_status_bottom", x: 0, y: 1040, w: 1920, h: 40, color: "#f72585", text: "Bottom status strip" }
+];
+
+function drawBase() {
+  ctx.fillStyle = "#151515";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  ctx.fillStyle = "#202020";
+  for (let y = 120; y < HEIGHT; y += 120) {
+    ctx.fillRect(0, y, WIDTH, 1);
+  }
+  for (let x = 160; x < WIDTH; x += 160) {
+    ctx.fillRect(x, 0, 1, HEIGHT);
+  }
+  ctx.fillStyle = "#cfcfcf";
+  ctx.font = "24px monospace";
+  ctx.fillText("type7_partial_ui_changes fixed background", 28, 108);
+}
+
+function drawStep(step, visible) {
+  drawBase();
+  if (!visible) return;
+  ctx.fillStyle = step.color;
+  ctx.fillRect(step.x, step.y, step.w, step.h);
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(step.x, step.y, step.w, step.h);
+  if (step.text) {
+    ctx.fillStyle = "#101010";
+    ctx.font = "28px monospace";
+    ctx.fillText(step.text, step.x + 18, step.y + Math.min(48, step.h - 18));
+  }
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  if (document.documentElement.requestFullscreen) {
+    try { await document.documentElement.requestFullscreen(); } catch (_) {}
+  }
+  console.log("type7-partial-ui-changes-start", new Date().toISOString());
+  for (const step of STEPS) {
+    console.log("step", step.label, step.x, step.y, step.w, step.h);
+    for (let i = 0; i < 6; i++) {
+      drawStep(step, i % 2 === 0);
+      await new Promise(resolve => setTimeout(resolve, 350));
+    }
+  }
+  drawBase();
+  console.log("type7-partial-ui-changes-done", new Date().toISOString());
+  running = false;
+}
+
+drawBase();
+window.addEventListener("keydown", event => {
+  if (event.code === "Space" || event.code === "Enter") run();
+});
+window.addEventListener("pointerdown", run);
+</script>
+</body>
+</html>

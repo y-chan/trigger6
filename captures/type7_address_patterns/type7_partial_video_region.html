@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>type7_partial_video_region</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0c0c0c;
+      cursor: none;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #0c0c0c;
+    }
+  </style>
+</head>
+<body>
+<canvas id="pattern" width="1920" height="1080"></canvas>
+<script>
+const WIDTH = 1920;
+const HEIGHT = 1080;
+const FPS = 30;
+const canvas = document.getElementById("pattern");
+const ctx = canvas.getContext("2d", { alpha: false });
+let running = false;
+
+const REGIONS = [
+  { label: "video_320x180", x: 800, y: 430, w: 320, h: 180, seconds: 3 },
+  { label: "video_640x360", x: 640, y: 350, w: 640, h: 360, seconds: 3 },
+  { label: "video_1280x720", x: 320, y: 180, w: 1280, h: 720, seconds: 4 },
+  { label: "video_1376x800", x: 272, y: 140, w: 1376, h: 800, seconds: 4 }
+];
+
+function drawShell(region) {
+  ctx.fillStyle = "#0c0c0c";
+  ctx.fillRect(0, 0, WIDTH, HEIGHT);
+  ctx.strokeStyle = "#303030";
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= WIDTH; x += 160) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, HEIGHT);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= HEIGHT; y += 120) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(WIDTH, y);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#d8d8d8";
+  ctx.font = "24px monospace";
+  ctx.fillText("type7_partial_video_region fixed shell", 28, 44);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(region.x, region.y, region.w, region.h);
+}
+
+function drawVideo(region, frame) {
+  drawShell(region);
+  const barCount = 12;
+  for (let i = 0; i < barCount; i++) {
+    const hue = (frame * 7 + i * 31) % 360;
+    ctx.fillStyle = `hsl(${hue}, 85%, ${38 + (i % 3) * 12}%)`;
+    const bx = region.x + Math.floor(i * region.w / barCount);
+    const bw = Math.ceil(region.w / barCount) + 1;
+    ctx.fillRect(bx, region.y, bw, region.h);
+  }
+  const cx = region.x + Math.round(((frame * 13) % region.w));
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(cx, region.y, Math.min(48, region.w), region.h);
+  ctx.fillStyle = "#111111";
+  ctx.font = "32px monospace";
+  ctx.fillText(`${region.label} frame=${frame}`, region.x + 24, region.y + 54);
+  console.log("frame", frame, "region", region.label, region.x, region.y, region.w, region.h);
+}
+
+async function run() {
+  if (running) return;
+  running = true;
+  if (document.documentElement.requestFullscreen) {
+    try { await document.documentElement.requestFullscreen(); } catch (_) {}
+  }
+  console.log("type7-partial-video-region-start", new Date().toISOString());
+  let frame = 0;
+  for (const region of REGIONS) {
+    console.log("segment", region.label, region.x, region.y, region.w, region.h);
+    for (let i = 0; i < region.seconds * FPS; i++) {
+      drawVideo(region, frame++);
+      await new Promise(resolve => setTimeout(resolve, 1000 / FPS));
+    }
+  }
+  drawShell(REGIONS[0]);
+  console.log("type7-partial-video-region-done", new Date().toISOString());
+  running = false;
+}
+
+drawShell(REGIONS[0]);
+window.addEventListener("keydown", event => {
+  if (event.code === "Space" || event.code === "Enter") run();
+});
+window.addEventListener("pointerdown", run);
+</script>
+</body>
+</html>
