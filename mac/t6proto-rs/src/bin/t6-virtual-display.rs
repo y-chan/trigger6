@@ -682,6 +682,12 @@ struct InterruptWaitSummary {
     last_data: u32,
 }
 
+impl InterruptWaitSummary {
+    fn ack_lag(self) -> u32 {
+        self.target_data.saturating_sub(self.last_data)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct UsbTiming {
     header: Duration,
@@ -1904,11 +1910,12 @@ fn drain_display_interrupts(device: &T6Device, duration: Duration) -> Result<u32
 fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
     match summary {
         Some(summary) => format!(
-            " interrupts={} fences={} matched={} target_data=0x{:08x} jpeg_errors={} last_event=0x{:02x} last_data=0x{:08x}",
+            " interrupts={} fences={} matched={} target_data=0x{:08x} ack_lag={} jpeg_errors={} last_event=0x{:02x} last_data=0x{:08x}",
             summary.packets,
             summary.fences,
             summary.matched_fences,
             summary.target_data,
+            summary.ack_lag(),
             summary.jpeg_errors,
             summary.last_event,
             summary.last_data
