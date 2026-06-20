@@ -1,0 +1,293 @@
+# summary
+type7_rows	58
+groups	58
+interrupts	83
+time_range	2.729465-7.278669
+
+# address_pairs
+addr_pair	count=27	start=0x250f710	end=0x2705f10	span=0x1f6800	sizes=448x64
+addr_pair	count=23	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	sizes=448x64
+addr_pair	count=7	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	sizes=448x64
+addr_pair	count=1	start=0x2daa9b0	end=0x2fa89b0	span=0x1fe000	sizes=1184x1080
+
+# cmd_dest_summary
+cmd_dest_summary	rows=58	wraps=0	min=0x3343a60	max=0x346b640
+cmd_dest_delta	count=11	delta=0x27e0
+cmd_dest_delta	count=8	delta=0x23e0
+cmd_dest_delta	count=7	delta=0x1be0
+cmd_dest_delta	count=7	delta=0x2be0
+cmd_dest_delta	count=6	delta=0x1fe0
+cmd_dest_delta	count=4	delta=0xfe0
+cmd_dest_delta	count=4	delta=0x17e0
+cmd_dest_delta	count=3	delta=0x13e0
+cmd_dest_delta	count=2	delta=0xbe0
+cmd_dest_delta	count=1	delta=0xc3e0
+cmd_dest_delta	count=1	delta=0x14bc0
+cmd_dest_delta	count=1	delta=0x167c0
+cmd_dest_delta	count=1	delta=0x1a3c0
+cmd_dest_delta	count=1	delta=0x6e340
+
+# cmd_dest_payload_correlation
+cmd_dest_payload_correlation	pairs=57	wraps=0	exact_align_payload=0	exact_align_payload_minus_32=53	exact_align_cmd_total=0	exact_align_cmd_total_minus_32=53	exact_align_data_len=0	within_1024_payload=53	consecutive_pairs=53	consecutive_exact_align_payload_minus_32=53
+cmd_dest_step	prev_frame=1225	next_frame=1233	prev_seq=0x00000af4	next_seq=0x00000af5	delta=0xfe0	align_payload=0x1000	align_payload_minus_32=0xfe0	align_cmd_total=0x1000	align_data=0x1000	prev_payload=4064	prev_cmd_total=4064	prev_size=448x64
+cmd_dest_step	prev_frame=1233	next_frame=1239	prev_seq=0x00000af5	next_seq=0x00000af6	delta=0x17e0	align_payload=0x1800	align_payload_minus_32=0x17e0	align_cmd_total=0x1800	align_data=0x1800	prev_payload=6112	prev_cmd_total=6112	prev_size=448x64
+cmd_dest_step	prev_frame=1239	next_frame=1245	prev_seq=0x00000af6	next_seq=0x00000af7	delta=0x1be0	align_payload=0x1c00	align_payload_minus_32=0x1be0	align_cmd_total=0x1c00	align_data=0x1c00	prev_payload=7136	prev_cmd_total=7136	prev_size=448x64
+cmd_dest_step	prev_frame=1245	next_frame=1251	prev_seq=0x00000af7	next_seq=0x00000af8	delta=0x1be0	align_payload=0x1c00	align_payload_minus_32=0x1be0	align_cmd_total=0x1c00	align_data=0x1c00	prev_payload=7136	prev_cmd_total=7136	prev_size=448x64
+cmd_dest_step	prev_frame=1251	next_frame=1257	prev_seq=0x00000af8	next_seq=0x00000af9	delta=0x1fe0	align_payload=0x2000	align_payload_minus_32=0x1fe0	align_cmd_total=0x2000	align_data=0x2000	prev_payload=8160	prev_cmd_total=8160	prev_size=448x64
+cmd_dest_step	prev_frame=1257	next_frame=1263	prev_seq=0x00000af9	next_seq=0x00000afa	delta=0x1fe0	align_payload=0x2000	align_payload_minus_32=0x1fe0	align_cmd_total=0x2000	align_data=0x2000	prev_payload=8160	prev_cmd_total=8160	prev_size=448x64
+cmd_dest_step	prev_frame=1263	next_frame=1269	prev_seq=0x00000afa	next_seq=0x00000afb	delta=0x23e0	align_payload=0x2400	align_payload_minus_32=0x23e0	align_cmd_total=0x2400	align_data=0x2400	prev_payload=9184	prev_cmd_total=9184	prev_size=448x64
+cmd_dest_step	prev_frame=1269	next_frame=1275	prev_seq=0x00000afb	next_seq=0x00000afc	delta=0x23e0	align_payload=0x2400	align_payload_minus_32=0x23e0	align_cmd_total=0x2400	align_data=0x2400	prev_payload=9184	prev_cmd_total=9184	prev_size=448x64
+cmd_dest_step	prev_frame=1275	next_frame=1281	prev_seq=0x00000afc	next_seq=0x00000afd	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1281	next_frame=1287	prev_seq=0x00000afd	next_seq=0x00000afe	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1287	next_frame=1293	prev_seq=0x00000afe	next_seq=0x00000aff	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1293	next_frame=1299	prev_seq=0x00000aff	next_seq=0x00000b00	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1299	next_frame=1305	prev_seq=0x00000b00	next_seq=0x00000b01	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1305	next_frame=1311	prev_seq=0x00000b01	next_seq=0x00000b02	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=1311	next_frame=1317	prev_seq=0x00000b02	next_seq=0x00000b03	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1317	next_frame=1323	prev_seq=0x00000b03	next_seq=0x00000b04	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1323	next_frame=1329	prev_seq=0x00000b04	next_seq=0x00000b05	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1329	next_frame=1335	prev_seq=0x00000b05	next_seq=0x00000b06	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1335	next_frame=1341	prev_seq=0x00000b06	next_seq=0x00000b07	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1341	next_frame=1347	prev_seq=0x00000b07	next_seq=0x00000b08	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=1347	next_frame=2487	prev_seq=0x00000b08	next_seq=0x00000b0e	delta=0x6e340	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=2487	next_frame=2511	prev_seq=0x00000b0e	next_seq=0x00000b10	delta=0x1a3c0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=2511	next_frame=2521	prev_seq=0x00000b10	next_seq=0x00000b11	delta=0x2be0	align_payload=0x2c00	align_payload_minus_32=0x2be0	align_cmd_total=0x2c00	align_data=0x2c00	prev_payload=11232	prev_cmd_total=11232	prev_size=448x64
+cmd_dest_step	prev_frame=2521	next_frame=2527	prev_seq=0x00000b11	next_seq=0x00000b12	delta=0xc3e0	align_payload=0xc400	align_payload_minus_32=0xc3e0	align_cmd_total=0xc400	align_data=0xc400	prev_payload=50144	prev_cmd_total=50144	prev_size=1184x1080
+cmd_dest_step	prev_frame=2527	next_frame=2537	prev_seq=0x00000b12	next_seq=0x00000b14	delta=0x14bc0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=2537	next_frame=2545	prev_seq=0x00000b14	next_seq=0x00000b15	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=2545	next_frame=2551	prev_seq=0x00000b15	next_seq=0x00000b16	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=2551	next_frame=2557	prev_seq=0x00000b16	next_seq=0x00000b17	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=2557	next_frame=2563	prev_seq=0x00000b17	next_seq=0x00000b18	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+cmd_dest_step	prev_frame=2563	next_frame=2569	prev_seq=0x00000b18	next_seq=0x00000b19	delta=0x27e0	align_payload=0x2800	align_payload_minus_32=0x27e0	align_cmd_total=0x2800	align_data=0x2800	prev_payload=10208	prev_cmd_total=10208	prev_size=448x64
+
+# address_transition_summary
+address_transition_summary	pairs=4	steps=57	same_pair_steps=51	pair_changes=6	consecutive_same_pair=51	consecutive_pair_changes=2
+# address_pair_runs
+address_pair	count=27	start=0x250f710	end=0x2705f10	span=0x1f6800	seq_min=0xb14	seq_max=0xb2e	cmd_min=0x341da60	cmd_max=0x3450720	pcaps=win_type7_addr_grid_64x64.pcapng	sizes=448x64
+address_pair	count=23	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	seq_min=0xaf4	seq_max=0xb12	cmd_min=0x3343a60	cmd_max=0x3408ea0	pcaps=win_type7_addr_grid_64x64.pcapng	sizes=448x64
+address_pair	count=7	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	seq_min=0xb0e	seq_max=0xb35	cmd_min=0x33dfb20	cmd_max=0x346b640	pcaps=win_type7_addr_grid_64x64.pcapng	sizes=448x64
+address_pair	count=1	start=0x2daa9b0	end=0x2fa89b0	span=0x1fe000	seq_min=0xb11	seq_max=0xb11	cmd_min=0x33fcac0	cmd_max=0x33fcac0	pcaps=win_type7_addr_grid_64x64.pcapng	sizes=1184x1080
+# address_transitions
+address_transition	count=26	from=0x250f710-0x2705f10	to=0x250f710-0x2705f10	same=True
+address_transition	count=20	from=0x2db9c90-0x2fb0490	to=0x2db9c90-0x2fb0490	same=True
+address_transition	count=5	from=0x29649d0-0x2b5b1d0	to=0x29649d0-0x2b5b1d0	same=True
+address_transition	count=1	from=0x250f710-0x2705f10	to=0x29649d0-0x2b5b1d0	same=False
+address_transition	count=1	from=0x29649d0-0x2b5b1d0	to=0x2db9c90-0x2fb0490	same=False
+address_transition	count=1	from=0x2daa9b0-0x2fa89b0	to=0x2db9c90-0x2fb0490	same=False
+address_transition	count=1	from=0x2db9c90-0x2fb0490	to=0x250f710-0x2705f10	same=False
+address_transition	count=1	from=0x2db9c90-0x2fb0490	to=0x29649d0-0x2b5b1d0	same=False
+address_transition	count=1	from=0x2db9c90-0x2fb0490	to=0x2daa9b0-0x2fa89b0	same=False
+
+# jpeg_summary
+jpeg_summary	rows=58	rows_with_details=58
+jpeg_sof	count=58	marker=0xc0	name=baseline
+jpeg_components	count=58	components=id0:2x2:q0,id1:1x1:q1,id2:1x1:q1
+jpeg_size_components	count=57	size=448x64	components=id0:2x2:q0,id1:1x1:q1,id2:1x1:q1
+jpeg_size_components	count=1	size=1184x1080	components=id0:2x2:q0,id1:1x1:q1,id2:1x1:q1
+
+# ack_summary
+ack_summary	tiles=58	interrupt_values=83	matched=56	missing=2	negative_dt=0
+ack_latency_ms	min=0.343	p50=1.380	p90=2.284	max=7.419
+ack_duplicate_sequence_matches	0
+ack_match	tile_frame=1225	seq=0x00000af4	tile_time=2.729465	interrupt_frame=1227	interrupt_time=2.729937	dt_ms=0.472	size=448x64	cmd_dest=0x03343a60	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1233	seq=0x00000af5	tile_time=2.746585	interrupt_frame=1235	interrupt_time=2.747938	dt_ms=1.353	size=448x64	cmd_dest=0x03344a40	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1239	seq=0x00000af6	tile_time=2.762843	interrupt_frame=1241	interrupt_time=2.763936	dt_ms=1.093	size=448x64	cmd_dest=0x03346220	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1245	seq=0x00000af7	tile_time=2.779458	interrupt_frame=1247	interrupt_time=2.779933	dt_ms=0.475	size=448x64	cmd_dest=0x03347e00	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1251	seq=0x00000af8	tile_time=2.795799	interrupt_frame=1253	interrupt_time=2.797933	dt_ms=2.134	size=448x64	cmd_dest=0x033499e0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1257	seq=0x00000af9	tile_time=2.812904	interrupt_frame=1259	interrupt_time=2.813931	dt_ms=1.027	size=448x64	cmd_dest=0x0334b9c0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1263	seq=0x00000afa	tile_time=2.829015	interrupt_frame=1265	interrupt_time=2.829929	dt_ms=0.914	size=448x64	cmd_dest=0x0334d9a0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1269	seq=0x00000afb	tile_time=2.846246	interrupt_frame=1271	interrupt_time=2.847927	dt_ms=1.681	size=448x64	cmd_dest=0x0334fd80	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1275	seq=0x00000afc	tile_time=2.862502	interrupt_frame=1277	interrupt_time=2.863926	dt_ms=1.424	size=448x64	cmd_dest=0x03352160	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1281	seq=0x00000afd	tile_time=2.879620	interrupt_frame=1283	interrupt_time=2.881923	dt_ms=2.303	size=448x64	cmd_dest=0x03354940	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1287	seq=0x00000afe	tile_time=2.895799	interrupt_frame=1289	interrupt_time=2.897926	dt_ms=2.127	size=448x64	cmd_dest=0x03357120	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1293	seq=0x00000aff	tile_time=2.912833	interrupt_frame=1295	interrupt_time=2.913919	dt_ms=1.086	size=448x64	cmd_dest=0x03359900	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1299	seq=0x00000b00	tile_time=2.929118	interrupt_frame=1301	interrupt_time=2.929923	dt_ms=0.805	size=448x64	cmd_dest=0x0335c0e0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1305	seq=0x00000b01	tile_time=2.946249	interrupt_frame=1307	interrupt_time=2.947919	dt_ms=1.670	size=448x64	cmd_dest=0x0335e8c0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1311	seq=0x00000b02	tile_time=2.962392	interrupt_frame=1313	interrupt_time=2.963920	dt_ms=1.528	size=448x64	cmd_dest=0x033610a0	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1317	seq=0x00000b03	tile_time=2.979634	interrupt_frame=1319	interrupt_time=2.981918	dt_ms=2.284	size=448x64	cmd_dest=0x03363c80	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1323	seq=0x00000b04	tile_time=2.995842	interrupt_frame=1325	interrupt_time=2.997918	dt_ms=2.076	size=448x64	cmd_dest=0x03366860	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1329	seq=0x00000b05	tile_time=3.012579	interrupt_frame=1331	interrupt_time=3.013915	dt_ms=1.336	size=448x64	cmd_dest=0x03369440	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1335	seq=0x00000b06	tile_time=3.029433	interrupt_frame=1337	interrupt_time=3.029917	dt_ms=0.484	size=448x64	cmd_dest=0x0336c020	start=0x2db9c90	end=0x2fb0490
+ack_match	tile_frame=1341	seq=0x00000b07	tile_time=3.045938	interrupt_frame=1343	interrupt_time=3.047912	dt_ms=1.974	size=448x64	cmd_dest=0x0336ec00	start=0x2db9c90	end=0x2fb0490
+ack_match_more	36
+ack_missing	tile_frame=2511	seq=0x00000b10	time=6.651389	size=448x64	cmd_dest=0x033f9ee0
+ack_missing	tile_frame=2945	seq=0x00000b30	time=7.200483	size=448x64	cmd_dest=0x03466ee0
+
+group	idx=1	count=1	time=2.729465-2.729465	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1225-1225	seq=2804-2804	payload=4064	jpeg_bytes~=3968	cmd_dests=0x3343a60	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1227	time=2.729937	dt_start=0.47ms	flags=0x04	value=0x00000af4	event=0x04
+  tile	frame=1225	cmd_frame=1223	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.729465	seq=2804	cmd_dest=0x03343a60	payload=4064	data_len=4016	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=2	count=1	time=2.746585-2.746585	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1233-1233	seq=2805-2805	payload=6112	jpeg_bytes~=6016	cmd_dests=0x3344a40	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1235	time=2.747938	dt_start=1.35ms	flags=0x04	value=0x00000af5	event=0x04
+  tile	frame=1233	cmd_frame=1231	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.746585	seq=2805	cmd_dest=0x03344a40	payload=6112	data_len=6064	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=3	count=1	time=2.762843-2.762843	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1239-1239	seq=2806-2806	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3346220	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1241	time=2.763936	dt_start=1.09ms	flags=0x04	value=0x00000af6	event=0x04
+  tile	frame=1239	cmd_frame=1237	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.762843	seq=2806	cmd_dest=0x03346220	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=4	count=1	time=2.779458-2.779458	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1245-1245	seq=2807-2807	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3347e00	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1247	time=2.779933	dt_start=0.48ms	flags=0x04	value=0x00000af7	event=0x04
+  tile	frame=1245	cmd_frame=1243	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.779458	seq=2807	cmd_dest=0x03347e00	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=5	count=1	time=2.795799-2.795799	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1251-1251	seq=2808-2808	payload=8160	jpeg_bytes~=8064	cmd_dests=0x33499e0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1253	time=2.797933	dt_start=2.13ms	flags=0x04	value=0x00000af8	event=0x04
+  tile	frame=1251	cmd_frame=1249	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.795799	seq=2808	cmd_dest=0x033499e0	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=6	count=1	time=2.812904-2.812904	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1257-1257	seq=2809-2809	payload=8160	jpeg_bytes~=8064	cmd_dests=0x334b9c0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1259	time=2.813931	dt_start=1.03ms	flags=0x04	value=0x00000af9	event=0x04
+  tile	frame=1257	cmd_frame=1255	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.812904	seq=2809	cmd_dest=0x0334b9c0	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=7	count=1	time=2.829015-2.829015	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1263-1263	seq=2810-2810	payload=9184	jpeg_bytes~=9088	cmd_dests=0x334d9a0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1265	time=2.829929	dt_start=0.91ms	flags=0x04	value=0x00000afa	event=0x04
+  tile	frame=1263	cmd_frame=1261	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.829015	seq=2810	cmd_dest=0x0334d9a0	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=8	count=1	time=2.846246-2.846246	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1269-1269	seq=2811-2811	payload=9184	jpeg_bytes~=9088	cmd_dests=0x334fd80	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1271	time=2.847927	dt_start=1.68ms	flags=0x04	value=0x00000afb	event=0x04
+  tile	frame=1269	cmd_frame=1267	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.846246	seq=2811	cmd_dest=0x0334fd80	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=9	count=1	time=2.862502-2.862502	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1275-1275	seq=2812-2812	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3352160	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1277	time=2.863926	dt_start=1.42ms	flags=0x04	value=0x00000afc	event=0x04
+  tile	frame=1275	cmd_frame=1273	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.862502	seq=2812	cmd_dest=0x03352160	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=10	count=1	time=2.879620-2.879620	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1281-1281	seq=2813-2813	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3354940	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1283	time=2.881923	dt_start=2.30ms	flags=0x04	value=0x00000afd	event=0x04
+  tile	frame=1281	cmd_frame=1279	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.879620	seq=2813	cmd_dest=0x03354940	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=11	count=1	time=2.895799-2.895799	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1287-1287	seq=2814-2814	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3357120	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1289	time=2.897926	dt_start=2.13ms	flags=0x04	value=0x00000afe	event=0x04
+  tile	frame=1287	cmd_frame=1285	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.895799	seq=2814	cmd_dest=0x03357120	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=12	count=1	time=2.912833-2.912833	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1293-1293	seq=2815-2815	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3359900	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1295	time=2.913919	dt_start=1.09ms	flags=0x04	value=0x00000aff	event=0x04
+  tile	frame=1293	cmd_frame=1291	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.912833	seq=2815	cmd_dest=0x03359900	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=13	count=1	time=2.929118-2.929118	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1299-1299	seq=2816-2816	payload=10208	jpeg_bytes~=10112	cmd_dests=0x335c0e0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1301	time=2.929923	dt_start=0.81ms	flags=0x04	value=0x00000b00	event=0x04
+  tile	frame=1299	cmd_frame=1297	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.929118	seq=2816	cmd_dest=0x0335c0e0	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=14	count=1	time=2.946249-2.946249	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1305-1305	seq=2817-2817	payload=10208	jpeg_bytes~=10112	cmd_dests=0x335e8c0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1307	time=2.947919	dt_start=1.67ms	flags=0x04	value=0x00000b01	event=0x04
+  tile	frame=1305	cmd_frame=1303	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.946249	seq=2817	cmd_dest=0x0335e8c0	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=15	count=1	time=2.962392-2.962392	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1311-1311	seq=2818-2818	payload=11232	jpeg_bytes~=11136	cmd_dests=0x33610a0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1313	time=2.963920	dt_start=1.53ms	flags=0x04	value=0x00000b02	event=0x04
+  tile	frame=1311	cmd_frame=1309	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.962392	seq=2818	cmd_dest=0x033610a0	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=16	count=1	time=2.979634-2.979634	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1317-1317	seq=2819-2819	payload=11232	jpeg_bytes~=11136	cmd_dests=0x3363c80	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1319	time=2.981918	dt_start=2.28ms	flags=0x04	value=0x00000b03	event=0x04
+  tile	frame=1317	cmd_frame=1315	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.979634	seq=2819	cmd_dest=0x03363c80	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=17	count=1	time=2.995842-2.995842	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1323-1323	seq=2820-2820	payload=11232	jpeg_bytes~=11136	cmd_dests=0x3366860	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1325	time=2.997918	dt_start=2.08ms	flags=0x04	value=0x00000b04	event=0x04
+  tile	frame=1323	cmd_frame=1321	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=2.995842	seq=2820	cmd_dest=0x03366860	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=18	count=1	time=3.012579-3.012579	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1329-1329	seq=2821-2821	payload=11232	jpeg_bytes~=11136	cmd_dests=0x3369440	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1331	time=3.013915	dt_start=1.34ms	flags=0x04	value=0x00000b05	event=0x04
+  tile	frame=1329	cmd_frame=1327	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=3.012579	seq=2821	cmd_dest=0x03369440	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=19	count=1	time=3.029433-3.029433	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1335-1335	seq=2822-2822	payload=11232	jpeg_bytes~=11136	cmd_dests=0x336c020	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1337	time=3.029917	dt_start=0.48ms	flags=0x04	value=0x00000b06	event=0x04
+  tile	frame=1335	cmd_frame=1333	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=3.029433	seq=2822	cmd_dest=0x0336c020	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=20	count=1	time=3.045938-3.045938	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1341-1341	seq=2823-2823	payload=11232	jpeg_bytes~=11136	cmd_dests=0x336ec00	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1343	time=3.047912	dt_start=1.97ms	flags=0x04	value=0x00000b07	event=0x04
+  tile	frame=1341	cmd_frame=1339	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=3.045938	seq=2823	cmd_dest=0x0336ec00	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=21	count=1	time=3.062539-3.062539	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=1347-1347	seq=2824-2824	payload=11232	jpeg_bytes~=11136	cmd_dests=0x33717e0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=1349	time=3.063910	dt_start=1.37ms	flags=0x04	value=0x00000b08	event=0x04
+  tile	frame=1347	cmd_frame=1345	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=3.062539	seq=2824	cmd_dest=0x033717e0	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=22	count=1	time=6.596846-6.596846	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2487-2487	seq=2830-2830	payload=11232	jpeg_bytes~=11136	cmd_dests=0x33dfb20	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2489	time=6.597634	dt_start=0.79ms	flags=0x04	value=0x00000b0e	event=0x04
+  tile	frame=2487	cmd_frame=2485	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.596846	seq=2830	cmd_dest=0x033dfb20	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=23	count=1	time=6.651389-6.651389	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2511-2511	seq=2832-2832	payload=11232	jpeg_bytes~=11136	cmd_dests=0x33f9ee0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  tile	frame=2511	cmd_frame=2509	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.651389	seq=2832	cmd_dest=0x033f9ee0	payload=11232	data_len=11184	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=24	count=1	time=6.666208-6.666208	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2521-2521	seq=2833-2833	payload=50144	jpeg_bytes~=50048	cmd_dests=0x33fcac0	starts=0x2daa9b0	ends=0x2fa89b0	spans=0x1fe000	sizes=1184x1080
+  interrupt	frame=2515	time=6.661634	dt_start=-4.57ms	flags=0x04	value=0x00000b0f	event=0x04
+  interrupt	frame=2517	time=6.663631	dt_start=-2.58ms	flags=0x04	value=0x00000b10	event=0x04
+  interrupt	frame=2523	time=6.673627	dt_start=7.42ms	flags=0x04	value=0x00000b11	event=0x04
+  tile	frame=2521	cmd_frame=2519	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.666208	seq=2833	cmd_dest=0x033fcac0	payload=50144	data_len=50096	size=1184x1080	jpeg=1184x1080	canvas=1920x1920	start=0x2daa9b0	end=0x2fa89b0	span=0x1fe000	format=0xd
+group	idx=25	count=1	time=6.679512-6.679512	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2527-2527	seq=2834-2834	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3408ea0	starts=0x2db9c90	ends=0x2fb0490	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2523	time=6.673627	dt_start=-5.89ms	flags=0x04	value=0x00000b11	event=0x04
+  interrupt	frame=2529	time=6.681628	dt_start=2.12ms	flags=0x04	value=0x00000b12	event=0x04
+  tile	frame=2527	cmd_frame=2525	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.679512	seq=2834	cmd_dest=0x03408ea0	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x2db9c90	end=0x2fb0490	span=0x1f6800	format=0xd
+group	idx=26	count=1	time=6.712611-6.712611	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2537-2537	seq=2836-2836	payload=10208	jpeg_bytes~=10112	cmd_dests=0x341da60	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2539	time=6.713626	dt_start=1.01ms	flags=0x04	value=0x00000b13	event=0x04
+  interrupt	frame=2541	time=6.715622	dt_start=3.01ms	flags=0x04	value=0x00000b14	event=0x04
+  tile	frame=2537	cmd_frame=2535	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.712611	seq=2836	cmd_dest=0x0341da60	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=27	count=1	time=6.729369-6.729369	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2545-2545	seq=2837-2837	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3420240	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2547	time=6.731627	dt_start=2.26ms	flags=0x04	value=0x00000b15	event=0x04
+  tile	frame=2545	cmd_frame=2543	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.729369	seq=2837	cmd_dest=0x03420240	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=28	count=1	time=6.746072-6.746072	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2551-2551	seq=2838-2838	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3422a20	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2553	time=6.747621	dt_start=1.55ms	flags=0x04	value=0x00000b16	event=0x04
+  tile	frame=2551	cmd_frame=2549	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.746072	seq=2838	cmd_dest=0x03422a20	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=29	count=1	time=6.762908-6.762908	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2557-2557	seq=2839-2839	payload=10208	jpeg_bytes~=10112	cmd_dests=0x3425200	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2559	time=6.763623	dt_start=0.71ms	flags=0x04	value=0x00000b17	event=0x04
+  tile	frame=2557	cmd_frame=2555	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.762908	seq=2839	cmd_dest=0x03425200	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=30	count=1	time=6.779284-6.779284	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2563-2563	seq=2840-2840	payload=10208	jpeg_bytes~=10112	cmd_dests=0x34279e0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2565	time=6.779627	dt_start=0.34ms	flags=0x04	value=0x00000b18	event=0x04
+  tile	frame=2563	cmd_frame=2561	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.779284	seq=2840	cmd_dest=0x034279e0	payload=10208	data_len=10160	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=31	count=1	time=6.795856-6.795856	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2569-2569	seq=2841-2841	payload=9184	jpeg_bytes~=9088	cmd_dests=0x342a1c0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2571	time=6.797627	dt_start=1.77ms	flags=0x04	value=0x00000b19	event=0x04
+  tile	frame=2569	cmd_frame=2567	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.795856	seq=2841	cmd_dest=0x0342a1c0	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=32	count=1	time=6.812371-6.812371	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2575-2575	seq=2842-2842	payload=9184	jpeg_bytes~=9088	cmd_dests=0x342c5a0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2577	time=6.813615	dt_start=1.24ms	flags=0x04	value=0x00000b1a	event=0x04
+  tile	frame=2575	cmd_frame=2573	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.812371	seq=2842	cmd_dest=0x0342c5a0	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=33	count=1	time=6.829064-6.829064	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2581-2581	seq=2843-2843	payload=9184	jpeg_bytes~=9088	cmd_dests=0x342e980	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2583	time=6.829618	dt_start=0.55ms	flags=0x04	value=0x00000b1b	event=0x04
+  tile	frame=2581	cmd_frame=2579	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.829064	seq=2843	cmd_dest=0x0342e980	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=34	count=1	time=6.845591-6.845591	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2587-2587	seq=2844-2844	payload=9184	jpeg_bytes~=9088	cmd_dests=0x3430d60	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2589	time=6.847616	dt_start=2.03ms	flags=0x04	value=0x00000b1c	event=0x04
+  tile	frame=2587	cmd_frame=2585	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.845591	seq=2844	cmd_dest=0x03430d60	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=35	count=1	time=6.862935-6.862935	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2593-2593	seq=2845-2845	payload=9184	jpeg_bytes~=9088	cmd_dests=0x3433140	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2595	time=6.863615	dt_start=0.68ms	flags=0x04	value=0x00000b1d	event=0x04
+  tile	frame=2593	cmd_frame=2591	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.862935	seq=2845	cmd_dest=0x03433140	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=36	count=1	time=6.879325-6.879325	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2599-2599	seq=2846-2846	payload=9184	jpeg_bytes~=9088	cmd_dests=0x3435520	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2601	time=6.881612	dt_start=2.29ms	flags=0x04	value=0x00000b1e	event=0x04
+  tile	frame=2599	cmd_frame=2597	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.879325	seq=2846	cmd_dest=0x03435520	payload=9184	data_len=9136	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=37	count=1	time=6.895711-6.895711	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2605-2605	seq=2847-2847	payload=8160	jpeg_bytes~=8064	cmd_dests=0x3437900	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2607	time=6.897609	dt_start=1.90ms	flags=0x04	value=0x00000b1f	event=0x04
+  tile	frame=2605	cmd_frame=2603	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.895711	seq=2847	cmd_dest=0x03437900	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=38	count=1	time=6.912366-6.912366	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2611-2611	seq=2848-2848	payload=8160	jpeg_bytes~=8064	cmd_dests=0x34398e0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2613	time=6.913610	dt_start=1.24ms	flags=0x04	value=0x00000b20	event=0x04
+  tile	frame=2611	cmd_frame=2609	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.912366	seq=2848	cmd_dest=0x034398e0	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=39	count=1	time=6.929008-6.929008	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2617-2617	seq=2849-2849	payload=8160	jpeg_bytes~=8064	cmd_dests=0x343b8c0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2619	time=6.929606	dt_start=0.60ms	flags=0x04	value=0x00000b21	event=0x04
+  tile	frame=2617	cmd_frame=2615	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.929008	seq=2849	cmd_dest=0x0343b8c0	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=40	count=1	time=6.945810-6.945810	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2623-2623	seq=2850-2850	payload=8160	jpeg_bytes~=8064	cmd_dests=0x343d8a0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2625	time=6.947608	dt_start=1.80ms	flags=0x04	value=0x00000b22	event=0x04
+  tile	frame=2623	cmd_frame=2621	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.945810	seq=2850	cmd_dest=0x0343d8a0	payload=8160	data_len=8112	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=41	count=1	time=6.962244-6.962244	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2629-2629	seq=2851-2851	payload=7136	jpeg_bytes~=7040	cmd_dests=0x343f880	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2631	time=6.963604	dt_start=1.36ms	flags=0x04	value=0x00000b23	event=0x04
+  tile	frame=2629	cmd_frame=2627	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.962244	seq=2851	cmd_dest=0x0343f880	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=42	count=1	time=6.978868-6.978868	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2635-2635	seq=2852-2852	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3441460	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2637	time=6.979612	dt_start=0.74ms	flags=0x04	value=0x00000b24	event=0x04
+  tile	frame=2635	cmd_frame=2633	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.978868	seq=2852	cmd_dest=0x03441460	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=43	count=1	time=6.995560-6.995560	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2658-2658	seq=2853-2853	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3443040	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2667	time=6.997628	dt_start=2.07ms	flags=0x04	value=0x00000b25	event=0x04
+  tile	frame=2658	cmd_frame=2656	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=6.995560	seq=2853	cmd_dest=0x03443040	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=44	count=1	time=7.012342-7.012342	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2688-2688	seq=2854-2854	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3444c20	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2691	time=7.013597	dt_start=1.25ms	flags=0x04	value=0x00000b26	event=0x04
+  tile	frame=2688	cmd_frame=2686	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.012342	seq=2854	cmd_dest=0x03444c20	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=45	count=1	time=7.028825-7.028825	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2731-2731	seq=2855-2855	payload=7136	jpeg_bytes~=7040	cmd_dests=0x3446800	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2734	time=7.029616	dt_start=0.79ms	flags=0x04	value=0x00000b27	event=0x04
+  tile	frame=2731	cmd_frame=2729	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.028825	seq=2855	cmd_dest=0x03446800	payload=7136	data_len=7088	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=46	count=1	time=7.045626-7.045626	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2748-2748	seq=2856-2856	payload=6112	jpeg_bytes~=6016	cmd_dests=0x34483e0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2750	time=7.047597	dt_start=1.97ms	flags=0x04	value=0x00000b28	event=0x04
+  tile	frame=2748	cmd_frame=2746	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.045626	seq=2856	cmd_dest=0x034483e0	payload=6112	data_len=6064	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=47	count=1	time=7.062212-7.062212	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2755-2755	seq=2857-2857	payload=6112	jpeg_bytes~=6016	cmd_dests=0x3449bc0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2763	time=7.063592	dt_start=1.38ms	flags=0x04	value=0x00000b29	event=0x04
+  tile	frame=2755	cmd_frame=2753	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.062212	seq=2857	cmd_dest=0x03449bc0	payload=6112	data_len=6064	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=48	count=1	time=7.078870-7.078870	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2791-2791	seq=2858-2858	payload=6112	jpeg_bytes~=6016	cmd_dests=0x344b3a0	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2798	time=7.079593	dt_start=0.72ms	flags=0x04	value=0x00000b2a	event=0x04
+  tile	frame=2791	cmd_frame=2789	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.078870	seq=2858	cmd_dest=0x0344b3a0	payload=6112	data_len=6064	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=49	count=1	time=7.095684-7.095684	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2822-2822	seq=2859-2859	payload=5088	jpeg_bytes~=4992	cmd_dests=0x344cb80	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2834	time=7.097595	dt_start=1.91ms	flags=0x04	value=0x00000b2b	event=0x04
+  tile	frame=2822	cmd_frame=2820	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.095684	seq=2859	cmd_dest=0x0344cb80	payload=5088	data_len=5040	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=50	count=1	time=7.112300-7.112300	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2850-2850	seq=2860-2860	payload=5088	jpeg_bytes~=4992	cmd_dests=0x344df60	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2852	time=7.113590	dt_start=1.29ms	flags=0x04	value=0x00000b2c	event=0x04
+  tile	frame=2850	cmd_frame=2848	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.112300	seq=2860	cmd_dest=0x0344df60	payload=5088	data_len=5040	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=51	count=1	time=7.128795-7.128795	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2863-2863	seq=2861-2861	payload=5088	jpeg_bytes~=4992	cmd_dests=0x344f340	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2870	time=7.129590	dt_start=0.80ms	flags=0x04	value=0x00000b2d	event=0x04
+  tile	frame=2863	cmd_frame=2861	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.128795	seq=2861	cmd_dest=0x0344f340	payload=5088	data_len=5040	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=52	count=1	time=7.145699-7.145699	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2904-2904	seq=2862-2862	payload=5088	jpeg_bytes~=4992	cmd_dests=0x3450720	starts=0x250f710	ends=0x2705f10	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2907	time=7.147585	dt_start=1.89ms	flags=0x04	value=0x00000b2e	event=0x04
+  tile	frame=2904	cmd_frame=2902	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.145699	seq=2862	cmd_dest=0x03450720	payload=5088	data_len=5040	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x250f710	end=0x2705f10	span=0x1f6800	format=0xd
+group	idx=53	count=1	time=7.200483-7.200483	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2945-2945	seq=2864-2864	payload=4064	jpeg_bytes~=3968	cmd_dests=0x3466ee0	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  tile	frame=2945	cmd_frame=2943	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.200483	seq=2864	cmd_dest=0x03466ee0	payload=4064	data_len=4016	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=54	count=1	time=7.212179-7.212179	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2951-2951	seq=2865-2865	payload=4064	jpeg_bytes~=3968	cmd_dests=0x3467ec0	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2947	time=7.211594	dt_start=-0.59ms	flags=0x04	value=0x00000b2f	event=0x04
+  interrupt	frame=2953	time=7.213582	dt_start=1.40ms	flags=0x04	value=0x00000b30	event=0x04
+  interrupt	frame=2955	time=7.215582	dt_start=3.40ms	flags=0x04	value=0x00000b31	event=0x04
+  tile	frame=2951	cmd_frame=2949	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.212179	seq=2865	cmd_dest=0x03467ec0	payload=4064	data_len=4016	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=55	count=1	time=7.228843-7.228843	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2959-2959	seq=2866-2866	payload=4064	jpeg_bytes~=3968	cmd_dests=0x3468ea0	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2961	time=7.229585	dt_start=0.74ms	flags=0x04	value=0x00000b32	event=0x04
+  tile	frame=2959	cmd_frame=2957	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.228843	seq=2866	cmd_dest=0x03468ea0	payload=4064	data_len=4016	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=56	count=1	time=7.245551-7.245551	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2965-2965	seq=2867-2867	payload=3040	jpeg_bytes~=2944	cmd_dests=0x3469e80	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2967	time=7.247585	dt_start=2.03ms	flags=0x04	value=0x00000b33	event=0x04
+  tile	frame=2965	cmd_frame=2963	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.245551	seq=2867	cmd_dest=0x03469e80	payload=3040	data_len=2992	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=57	count=1	time=7.261952-7.261952	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2971-2971	seq=2868-2868	payload=3040	jpeg_bytes~=2944	cmd_dests=0x346aa60	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2973	time=7.263584	dt_start=1.63ms	flags=0x04	value=0x00000b34	event=0x04
+  tile	frame=2971	cmd_frame=2969	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.261952	seq=2868	cmd_dest=0x0346aa60	payload=3040	data_len=2992	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
+group	idx=58	count=1	time=7.278669-7.278669	pcap=win_type7_addr_grid_64x64.pcapng	session=0	frames=2977-2977	seq=2869-2869	payload=3040	jpeg_bytes~=2944	cmd_dests=0x346b640	starts=0x29649d0	ends=0x2b5b1d0	spans=0x1f6800	sizes=448x64
+  interrupt	frame=2979	time=7.279578	dt_start=0.91ms	flags=0x04	value=0x00000b35	event=0x04
+  tile	frame=2977	cmd_frame=2975	pcap=win_type7_addr_grid_64x64.pcapng	session=0	time=7.278669	seq=2869	cmd_dest=0x0346b640	payload=3040	data_len=2992	size=448x64	jpeg=448x64	canvas=1920x1920	start=0x29649d0	end=0x2b5b1d0	span=0x1f6800	format=0xd
