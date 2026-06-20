@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import collections
+import csv
+import html
 import pathlib
 
 from t6_pcap_summary import (
@@ -54,6 +56,13 @@ def jpeg_eoi_offset(data: bytes, soi: int) -> int | None:
     return None if pos < 0 else pos + 2
 
 
+def trim_trailing_zeroes(data: bytes) -> bytes:
+    last = len(data) - 1
+    while last >= 0 and data[last] == 0:
+        last -= 1
+    return data[: last + 1]
+
+
 def summarize_reassembled(args: argparse.Namespace) -> int:
     packets = load_packets(args.pcap, tshark_path(args.tshark))
     pending_command: BulkCommand | None = None
@@ -95,6 +104,7 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
     complete_videos = 0
     incomplete_jpegs = 0
     exported = 0
+    rows: list[dict[str, object]] = []
     out_dir = args.export_jpegs
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -145,14 +155,86 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
                 f"components={header.jpeg_components}"
             )
 
-        if out_dir and header.jpeg_soi_offset >= 0 and eoi is not None:
-            name = (
-                f"{pathlib.Path(args.pcap).stem}_idx{index:04d}_"
-                f"frame{assembly.last_command.frame}_type{header.video_type:02x}_"
-                f"{header.jpeg_width}x{header.jpeg_height}.jpg"
-            )
-            (out_dir / name).write_bytes(packet.capdata[header.jpeg_soi_offset:eoi])
-            exported += 1
+        exported_name = ""
+        salvaged = False
+        if out_dir and header.jpeg_soi_offset >= 0:
+            if eoi is not None:
+                jpeg = packet.capdata[header.jpeg_soi_offset:eoi]
+            elif args.salvage_eoi:
+                jpeg = trim_trailing_zeroes(packet.capdata[header.jpeg_soi_offset:]) + b"\xff\xd9"
+                salvaged = True
+            else:
+                jpeg = b""
+            if jpeg:
+                suffix = "_salvaged" if salvaged else ""
+                name = (
+                    f"{pathlib.Path(args.pcap).stem}_idx{index:04d}_"
+                    f"frame{assembly.last_command.frame}_type{header.video_type:02x}_"
+                    f"{header.jpeg_width}x{header.jpeg_height}{suffix}.jpg"
+                )
+                (out_dir / name).write_bytes(jpeg)
+                exported_name = name
+                exported += 1
+
+        rows.append(
+            {
+                "idx": index,
+                "cmd_frame": assembly.first_command.frame,
+                "last_cmd_frame": assembly.last_command.frame,
+                "time": assembly.last_command.time,
+                "dest": f"0x{assembly.first_command.dest:08x}",
+                "total": f"0x{assembly.first_command.total_len:x}",
+                "fragments": assembly.fragments,
+                "type": f"0x{header.video_type:x}",
+                "format": f"0x{header.image_format:x}",
+                "sequence": f"0x{header.sequence:08x}",
+                "field": f"{header.width_field}x{header.height_field}",
+                "jpeg": f"{header.jpeg_width}x{header.jpeg_height}",
+                "start_addr": f"0x{header.start_addr:08x}",
+                "end_addr": f"0x{header.end_addr:08x}",
+                "span": f"0x{header.end_addr - header.start_addr:x}",
+                "soi": header.jpeg_soi_offset,
+                "eoi": eoi if eoi is not None else "",
+                "complete": eoi is not None,
+                "salvaged": salvaged,
+                "components": header.jpeg_components or "",
+                "file": exported_name,
+            }
+        )
+
+    if args.report_csv:
+        args.report_csv.parent.mkdir(parents=True, exist_ok=True)
+        with args.report_csv.open("w", newline="", encoding="utf-8") as f:
+            fieldnames = [
+                "idx",
+                "cmd_frame",
+                "last_cmd_frame",
+                "time",
+                "dest",
+                "total",
+                "fragments",
+                "type",
+                "format",
+                "sequence",
+                "field",
+                "jpeg",
+                "start_addr",
+                "end_addr",
+                "span",
+                "soi",
+                "eoi",
+                "complete",
+                "salvaged",
+                "components",
+                "file",
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+    if args.report_html:
+        args.report_html.parent.mkdir(parents=True, exist_ok=True)
+        args.report_html.write_text(render_html_report(args.pcap, rows), encoding="utf-8")
 
     print("# reassembly_summary")
     print(f"packets\t{len(packets)}")
@@ -173,6 +255,65 @@ def summarize_reassembled(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_html_report(pcap: str, rows: list[dict[str, object]]) -> str:
+    table_rows = []
+    for row in rows:
+        image = ""
+        if row["file"]:
+            image = f'<img src="{html.escape(str(row["file"]))}" loading="lazy">'
+        cells = [
+            image,
+            row["idx"],
+            row["time"],
+            row["type"],
+            row["sequence"],
+            row["dest"],
+            row["total"],
+            row["fragments"],
+            row["field"],
+            row["jpeg"],
+            row["start_addr"],
+            row["end_addr"],
+            row["span"],
+            row["complete"],
+            row["salvaged"],
+            row["components"],
+        ]
+        table_rows.append(
+            "<tr>"
+            + "".join(f"<td>{cell}</td>" if isinstance(cell, str) and cell.startswith("<img") else f"<td>{html.escape(str(cell))}</td>" for cell in cells)
+            + "</tr>"
+        )
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>T6 reassembled video report</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 16px; background: #111; color: #eee; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
+th, td {{ border: 1px solid #333; padding: 4px 6px; vertical-align: top; }}
+th {{ position: sticky; top: 0; background: #222; }}
+img {{ width: 240px; height: auto; display: block; }}
+code {{ color: #9cf; }}
+</style>
+</head>
+<body>
+<h1>T6 reassembled video report</h1>
+<p><code>{html.escape(pcap)}</code></p>
+<table>
+<thead><tr>
+<th>image</th><th>idx</th><th>time</th><th>type</th><th>seq</th><th>dest</th><th>total</th><th>frags</th><th>field</th><th>jpeg</th><th>start</th><th>end</th><th>span</th><th>complete</th><th>salvaged</th><th>components</th>
+</tr></thead>
+<tbody>
+{''.join(table_rows)}
+</tbody>
+</table>
+</body>
+</html>
+"""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("pcap")
@@ -181,6 +322,9 @@ def main() -> int:
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--export-jpegs", type=pathlib.Path)
+    parser.add_argument("--salvage-eoi", action="store_true")
+    parser.add_argument("--report-csv", type=pathlib.Path)
+    parser.add_argument("--report-html", type=pathlib.Path)
     return summarize_reassembled(parser.parse_args())
 
 
