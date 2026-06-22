@@ -471,6 +471,28 @@ Mac 側への反映:
 - full-frame path で有効だった JPEG 4:4:4 + yuv444 target は、type7 の再現実験には混ぜない。
 - type7 の色ズレ調査では、まず sampling ではなく `start_addr/end_addr` / target surface / expected output format を疑う。
 
+### 2026-06-21 niconico fullsnap の反映
+
+YouTube と niconico の fullsnap capture を比較した結果、type7 は任意 dirty rect というより、公式 driver が動画領域や画面下端の帯を固定パターンで送る経路に見える。
+
+観測値:
+
+- YouTube:
+  - type7: `1376x800`
+  - `delta_start=0x3c000`, `delta_end=0x1e000`, `span=0x1e0000`
+- niconico:
+  - type7: `832x480` / `832x544` / `832x800`
+  - `delta_start=0x78260`, `delta_end=0x3c260`, `span=0x1c2000`
+  - 追加で Windows taskbar 相当の `1920x56`
+  - `delta_start=0x1e0000`, `delta_end=0xf0000`, `span=0x10e000`
+
+次の実装方針:
+
+- `t6-virtual-display` の type7 は、任意 dirty bbox から即生成しない。
+- まず `t6-replay-video` / `t6-send-type7` で、capture 由来の type4 初期化直後に動画領域 type7 を安定 replay できる状態を基準にする。
+- 生成 type7 を戻す場合は、`--unsafe-generated-type7` のままにし、動画領域を明示指定した固定パターンから始める。
+- 色ズレや表示ズレが出る場合は、JPEG sampling より address range と surface state を優先して疑う。
+
 ### Windows full-frame JPEG の sampling
 
 `tools/t6_pcap_summary.py --jpeg-summary --jpeg-summary-only` を追加し、type7 以外の
@@ -493,6 +515,26 @@ JPEG payload も SOF marker / component sampling で集計した。
   JPEG path でも 4:4:4 は使われていない。
 - Mac 側で有効だった `jpeg 444 -> yuv444` は画質改善用の独自 fallback として扱い、
   Windows 再現 path の初期値にはしない。
+
+### JPEG 4:2:0 の画質差調査
+
+Windows 公式 driver の JPEG 4:2:0 が Mac/TurboJPEG より綺麗に見える理由は未解明。
+
+現時点の観測:
+
+- Windows fullsnap 抽出 JPEG は `Intel(R) IPP JPEG encoder [7.1.37466]` の comment を持つ。
+- Windows JPEG は baseline 4:2:0、component id は `0,1,2`。
+- macOS `sips` / ImageIO の quality 95 JPEG も baseline 4:2:0 だが、component id は `1,2,3`。
+- ImageIO の量子化テーブルは Windows IPP より軽いので、画質差は量子化だけでは説明しにくい。
+- VideoToolbox JPEG は probe 上 `VTCompressionSessionCreate(JPEG) failed: -12903` で、この環境では使えていない。
+
+次の切り分け:
+
+1. Windows 抽出 JPEG を `t6-send-jpeg --jpeg` でそのまま送る。
+2. 同じ画像を ImageIO/sips quality 95 で再エンコードした JPEG を送る。
+3. 同じ画像を TurboJPEG `--image` で再エンコードして送る。
+4. 1 が綺麗で 2/3 が滲むなら encoder/downsample 差が主因。
+5. 1 も滲むなら、公式 driver の表示経路は JPEG そのもの以外、たとえば type7 領域選択、raw NV12 path、target format、または T6 state の違いが効いている。
 
 ### group replay 用 export
 
@@ -591,3 +633,43 @@ cargo run --features usb --bin t6-send-type7 -- \
 `payload_b64` をそのまま bulk payload として送る。`cmd_dest` も capture 値を使う。
 これで表示が出るなら、synthetic tile 側の header/JPEG/group 条件が不足している。
 これでも出ないなら、type7 の前段 state、surface 初期化、または Windows capture 前後の別 command が必要。
+
+## 2026-06-21 公式 macOS ドライバ Ghidra 解析後の見直し
+
+type7 は Windows capture の replay で動画らしい更新までは確認できたが、色ズレ・位置ズレ・灰色欠けが残る。
+現時点では優先度を下げ、記録を残したうえで 420 画質差の切り分けを優先する。
+
+公式 macOS ドライバには次の経路がある。
+
+- VideoToolbox JPEG encoder
+- Metal/OpenCL 系の T6 専用 YUV420/JPEG encoder
+- dirty rect compressed submission
+- uncompressed YUV420/YUV444 upload
+
+重要なのは、公式の高速経路が ImageIO/TurboJPEG のような汎用 JPEG API だけではなさそうな点。
+埋め込み kernel では RGB/BGRX から YUV へ変換し、Cb/Cr を 2x2 平均してから DCT/quant/RLE/Huffman に進む。
+Windows/IP P JPEG と TurboJPEG q95 の量子化テーブルは一致したので、画質差の主因候補は量子化ではなく
+RGB->YUV 変換、420 downsample、または T6 専用 submit/target format の差。
+
+短期ロードマップ:
+
+1. Rust 側の JPEG420 前処理を公式 kernel 相当に寄せる。
+   - BGRX/RGB の扱いを明示する。
+   - Y: `0.299R + 0.587G + 0.114B - 128`
+   - Cb: `-0.168736R - 0.331264G + 0.5B`
+   - Cr: `0.5R - 0.418688G - 0.081312B`
+   - Cb/Cr は 2x2 average。
+2. 同じ capture frame から以下を保存・比較する。
+   - 現行 TurboJPEG 420
+   - 公式相当 downsample 420
+   - ImageIO 420
+   - Windows capture から抽出した IPP JPEG
+3. 信号機部分の crop/zoom を並べて、キャプチャ自体、JPEG decode 後、実機表示後のどこで滲むかを確認する。
+4. 改善しない場合、公式の `t6_compress_yuv420_gpu_dctquantrlehuff_whole_image` 相当を CPU/Rust で再現するか、
+   VideoToolbox JPEG 出力を T6 に渡す実験へ進む。
+
+中期ロードマップ:
+
+1. type7 は docs に残しつつ、Windows capture 由来 payload replay を基準にする。
+2. synthetic type7 は、公式 submit 経路のアラインメント制約と state がもう少し分かるまで保留。
+3. dirty rect 送信は、まず type4/full frame の画質と安定性が十分になってから再開する。

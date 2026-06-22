@@ -43,6 +43,10 @@ name = "t6-vt-jpeg-probe"
 path = "src/bin/t6-vt-jpeg-probe.rs"
 
 [[bin]]
+name = "t6-encode-jpeg"
+path = "src/bin/t6-encode-jpeg.rs"
+
+[[bin]]
 name = "t6-send-type7"
 path = "src/bin/t6-send-type7.rs"
 required-features = ["usb"]

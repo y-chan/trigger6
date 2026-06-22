@@ -126,6 +126,19 @@ typedef struct T6VTEncodeResult {
     CMSampleBufferRef sample_buffer;
 } T6VTEncodeResult;
 
+typedef struct T6VTJpegEncoder {
+    VTCompressionSessionRef session;
+    CVPixelBufferRef pixel_buffer;
+    uint8_t *jpeg_data;
+    size_t jpeg_len;
+    size_t jpeg_capacity;
+    size_t width;
+    size_t height;
+    float quality;
+} T6VTJpegEncoder;
+
+static NSString *preferred_jpeg_encoder_id(void);
+
 static void t6_vt_jpeg_output_callback(void *output_callback_refcon,
                                        void *source_frame_refcon,
                                        OSStatus status,
@@ -143,6 +156,236 @@ static void t6_vt_jpeg_output_callback(void *output_callback_refcon,
         result->sample_buffer = (CMSampleBufferRef)CFRetain(sample_buffer);
     }
     dispatch_semaphore_signal(result->semaphore);
+}
+
+static int t6_vt_jpeg_set_quality(T6VTJpegEncoder *encoder, float quality) {
+    if (encoder == NULL || encoder->session == NULL) {
+        return -1;
+    }
+    if (quality < 0.0f) {
+        quality = 0.0f;
+    } else if (quality > 1.0f) {
+        quality = 1.0f;
+    }
+    if (encoder->quality == quality) {
+        return 0;
+    }
+    CFNumberRef quality_number =
+        CFNumberCreate(kCFAllocatorDefault, kCFNumberFloatType, &quality);
+    if (quality_number == NULL) {
+        return -2;
+    }
+    OSStatus status =
+        VTSessionSetProperty(encoder->session, kVTCompressionPropertyKey_Quality, quality_number);
+    CFRelease(quality_number);
+    if (status != noErr) {
+        return (int)status;
+    }
+    encoder->quality = quality;
+    return 0;
+}
+
+void *t6_vt_jpeg_encoder_create(size_t width, size_t height, float quality) {
+    @autoreleasepool {
+        T6VTJpegEncoder *encoder = (T6VTJpegEncoder *)calloc(1, sizeof(T6VTJpegEncoder));
+        if (encoder == NULL) {
+            return NULL;
+        }
+        encoder->width = width;
+        encoder->height = height;
+        encoder->quality = -1.0f;
+
+        NSDictionary *pixel_attrs = @{
+            (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+            (__bridge NSString *)kCVPixelBufferWidthKey : @(width),
+            (__bridge NSString *)kCVPixelBufferHeightKey : @(height),
+            (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        };
+        CVReturn cv_status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                                 width,
+                                                 height,
+                                                 kCVPixelFormatType_32BGRA,
+                                                 NULL,
+                                                 &encoder->pixel_buffer);
+        if (cv_status != kCVReturnSuccess || encoder->pixel_buffer == NULL) {
+            fprintf(stderr, "t6_vt_jpeg_encoder_create: CVPixelBufferCreate failed: %d\n", (int)cv_status);
+            free(encoder);
+            return NULL;
+        }
+
+        NSString *encoder_id = preferred_jpeg_encoder_id();
+        NSDictionary *encoder_spec = nil;
+        if (encoder_id != nil) {
+            encoder_spec = @{
+                (__bridge NSString *)kVTVideoEncoderSpecification_EncoderID : encoder_id,
+                (__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @YES,
+            };
+        }
+
+        OSStatus status =
+            VTCompressionSessionCreate(kCFAllocatorDefault,
+                                       (int32_t)width,
+                                       (int32_t)height,
+                                       kCMVideoCodecType_JPEG,
+                                       encoder_spec == nil ? NULL : (__bridge CFDictionaryRef)encoder_spec,
+                                       (__bridge CFDictionaryRef)pixel_attrs,
+                                       NULL,
+                                       t6_vt_jpeg_output_callback,
+                                       NULL,
+                                       &encoder->session);
+        if (status != noErr || encoder->session == NULL) {
+            status = VTCompressionSessionCreate(kCFAllocatorDefault,
+                                                (int32_t)width,
+                                                (int32_t)height,
+                                                kCMVideoCodecType_JPEG,
+                                                NULL,
+                                                (__bridge CFDictionaryRef)pixel_attrs,
+                                                NULL,
+                                                t6_vt_jpeg_output_callback,
+                                                NULL,
+                                                &encoder->session);
+        }
+        if (status != noErr || encoder->session == NULL) {
+            fprintf(stderr, "t6_vt_jpeg_encoder_create: VTCompressionSessionCreate failed: %d\n", (int)status);
+            CVPixelBufferRelease(encoder->pixel_buffer);
+            free(encoder);
+            return NULL;
+        }
+
+        t6_vt_jpeg_set_quality(encoder, quality);
+        VTSessionSetProperty(encoder->session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
+        VTSessionSetProperty(encoder->session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
+        int max_delay = 0;
+        CFNumberRef max_delay_number =
+            CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &max_delay);
+        if (max_delay_number != NULL) {
+            VTSessionSetProperty(encoder->session,
+                                 kVTCompressionPropertyKey_MaxFrameDelayCount,
+                                 max_delay_number);
+            CFRelease(max_delay_number);
+        }
+        if (@available(macOS 11.0, *)) {
+            VTSessionSetProperty(encoder->session,
+                                 kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+                                 kCFBooleanTrue);
+        }
+        status = VTCompressionSessionPrepareToEncodeFrames(encoder->session);
+        if (status != noErr) {
+            fprintf(stderr, "t6_vt_jpeg_encoder_create: VTCompressionSessionPrepareToEncodeFrames failed: %d\n", (int)status);
+            VTCompressionSessionInvalidate(encoder->session);
+            CFRelease(encoder->session);
+            CVPixelBufferRelease(encoder->pixel_buffer);
+            free(encoder);
+            return NULL;
+        }
+
+        return encoder;
+    }
+}
+
+void t6_vt_jpeg_encoder_destroy(void *opaque) {
+    T6VTJpegEncoder *encoder = (T6VTJpegEncoder *)opaque;
+    if (encoder == NULL) {
+        return;
+    }
+    if (encoder->session != NULL) {
+        VTCompressionSessionCompleteFrames(encoder->session, kCMTimeInvalid);
+        VTCompressionSessionInvalidate(encoder->session);
+        CFRelease(encoder->session);
+    }
+    if (encoder->pixel_buffer != NULL) {
+        CVPixelBufferRelease(encoder->pixel_buffer);
+    }
+    free(encoder->jpeg_data);
+    free(encoder);
+}
+
+int t6_vt_jpeg_encoder_encode_bgra(void *opaque,
+                                   const uint8_t *bgra,
+                                   size_t width,
+                                   size_t height,
+                                   size_t stride,
+                                   float quality,
+                                   const uint8_t **jpeg_data,
+                                   size_t *jpeg_len) {
+    @autoreleasepool {
+        T6VTJpegEncoder *encoder = (T6VTJpegEncoder *)opaque;
+        if (encoder == NULL || bgra == NULL || jpeg_data == NULL || jpeg_len == NULL) {
+            return -1;
+        }
+        if (width != encoder->width || height != encoder->height) {
+            return -2;
+        }
+        int quality_status = t6_vt_jpeg_set_quality(encoder, quality);
+        if (quality_status != 0) {
+            return quality_status;
+        }
+
+        CVPixelBufferLockBaseAddress(encoder->pixel_buffer, 0);
+        uint8_t *dst_base = (uint8_t *)CVPixelBufferGetBaseAddress(encoder->pixel_buffer);
+        size_t dst_stride = CVPixelBufferGetBytesPerRow(encoder->pixel_buffer);
+        for (size_t y = 0; y < height; y++) {
+            memcpy(dst_base + y * dst_stride, bgra + y * stride, width * 4);
+        }
+        CVPixelBufferUnlockBaseAddress(encoder->pixel_buffer, 0);
+
+        T6VTEncodeResult result;
+        result.semaphore = dispatch_semaphore_create(0);
+        result.status = noErr;
+        result.sample_buffer = NULL;
+
+        VTEncodeInfoFlags info_flags = 0;
+        OSStatus status = VTCompressionSessionEncodeFrame(encoder->session,
+                                                          encoder->pixel_buffer,
+                                                          CMTimeMake(0, 60),
+                                                          kCMTimeInvalid,
+                                                          NULL,
+                                                          &result,
+                                                          &info_flags);
+        if (status != noErr) {
+            return (int)status;
+        }
+        long wait_status =
+            dispatch_semaphore_wait(result.semaphore,
+                                    dispatch_time(DISPATCH_TIME_NOW, 5LL * NSEC_PER_SEC));
+        if (wait_status != 0) {
+            if (result.sample_buffer != NULL) {
+                CFRelease(result.sample_buffer);
+            }
+            return -3;
+        }
+        if (result.status != noErr || result.sample_buffer == NULL) {
+            if (result.sample_buffer != NULL) {
+                CFRelease(result.sample_buffer);
+            }
+            return result.status == noErr ? -4 : (int)result.status;
+        }
+
+        CMBlockBufferRef block_buffer = CMSampleBufferGetDataBuffer(result.sample_buffer);
+        size_t len = block_buffer == NULL ? 0 : CMBlockBufferGetDataLength(block_buffer);
+        if (block_buffer == NULL || len == 0) {
+            CFRelease(result.sample_buffer);
+            return -5;
+        }
+        if (encoder->jpeg_capacity < len) {
+            uint8_t *new_data = (uint8_t *)realloc(encoder->jpeg_data, len);
+            if (new_data == NULL) {
+                CFRelease(result.sample_buffer);
+                return -6;
+            }
+            encoder->jpeg_data = new_data;
+            encoder->jpeg_capacity = len;
+        }
+        status = CMBlockBufferCopyDataBytes(block_buffer, 0, len, encoder->jpeg_data);
+        CFRelease(result.sample_buffer);
+        if (status != noErr) {
+            return (int)status;
+        }
+        encoder->jpeg_len = len;
+        *jpeg_data = encoder->jpeg_data;
+        *jpeg_len = encoder->jpeg_len;
+        return 0;
+    }
 }
 
 static void print_encoder_list(void) {
@@ -258,6 +501,12 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
     @autoreleasepool {
         print_encoder_list();
 
+        NSDictionary *pixel_attrs = @{
+            (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+            (__bridge NSString *)kCVPixelBufferWidthKey : @(width),
+            (__bridge NSString *)kCVPixelBufferHeightKey : @(height),
+            (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        };
         CVPixelBufferRef pixel_buffer = NULL;
         CVReturn cv_status = CVPixelBufferCreate(kCFAllocatorDefault,
                                                  width,
@@ -287,7 +536,7 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
                                        (int32_t)height,
                                        kCMVideoCodecType_JPEG,
                                        encoder_spec == nil ? NULL : (__bridge CFDictionaryRef)encoder_spec,
-                                       NULL,
+                                       (__bridge CFDictionaryRef)pixel_attrs,
                                        NULL,
                                        t6_vt_jpeg_output_callback,
                                        NULL,
@@ -299,7 +548,7 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
                                                 (int32_t)height,
                                                 kCMVideoCodecType_JPEG,
                                                 NULL,
-                                                NULL,
+                                                (__bridge CFDictionaryRef)pixel_attrs,
                                                 NULL,
                                                 t6_vt_jpeg_output_callback,
                                                 NULL,

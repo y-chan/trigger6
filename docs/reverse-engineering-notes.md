@@ -159,6 +159,79 @@ Intel(R) IPP JPEG encoder [7.1.37466] - Sep 25 2012;
 
 このため、Windows 公式 driver は Intel IPP 系 JPEG encoder を使っている可能性が高い。
 
+2026-06-21 に fullsnap 由来の Windows JPEG を `tools/t6_jpeg_inspect.py` で詳しく見たところ、YouTube type4 と niconico type7 のどちらも同じ傾向だった。
+
+```text
+comment = Intel(R) IPP JPEG encoder [7.1.37466] - Sep 25 2012;
+SOF0 baseline
+components = id0:2x2:q0,id1:1x1:q1,id2:1x1:q1
+DQT luma sum = 369
+DQT chroma sum = 558
+```
+
+macOS の `sips` / ImageIO で同じ JPEG を quality 95 再エンコードすると、同じ baseline 4:2:0 だが component id は `1,2,3` になり、量子化テーブルは Windows IPP より軽い。
+
+```text
+components = id1:2x2:q0,id2:1x1:q1,id3:1x1:q1
+DQT luma sum = 330
+DQT chroma sum = 497
+```
+
+したがって、Windows が JPEG 4:2:0 でも綺麗に見える理由は、単純に「量子化が弱いから」だけでは説明しにくい。候補は以下。
+
+- IPP encoder の RGB->YCbCr 変換と chroma downsample filter が TurboJPEG FASTDCT より UI に有利。
+- Windows 側は動画/表示内容に応じて type4/type7 の領域を切り替え、UI の細い赤/緑境界を劣化しにくいスケールで送っている。
+- Mac 側 capture/rotate/resize のどこかで、JPEG 4:2:0 前に既に色境界がぼけている。
+- T6 側 JPEG decoder は component id `0,1,2` と `1,2,3` の両方を受けるが、内部 YUV target や header color 指定との組み合わせで見え方が変わる可能性がある。
+
+VideoToolbox JPEG encoder は `t6-vt-jpeg-probe` で試したが、この環境では `VTCompressionSessionCreate(JPEG) failed: -12903` で作成できなかった。少なくとも現状の probe 実装では VideoToolbox JPEG を本命にできない。macOS 標準 encoder を試すなら、まず ImageIO / CGImageDestination 系での静止画 encode を比較する。
+
+公式 Mac driver 4.2.0 のインストール物も確認した。
+
+```text
+/Library/Application Support/USBDisplayDriver/Driver/USBDisplayDriverAppLauncher
+/Library/LaunchAgents/tw.com.mct.USBDisplayDriverAppLauncher.plist
+/Applications/USB Display.app/Contents/Resources/USB Display Device Driver.app
+/Applications/USB Display.app/Contents/Resources/USB Display Device Driver.app/Contents/Library/SystemExtensions/tw.com.mct.mcttriggerdriver.Trigger6Dext.dext
+```
+
+`USBDisplayDriverAppLauncher` は device match 時に `USB Display Device Driver.app` を起動する launcher。実際の USB bulk は DriverKit dext `Trigger6Dext`、画面 capture/encode は user-space app 側に寄っている。
+
+`USB Display Device Driver` 本体は以下を link していた。
+
+```text
+VideoToolbox.framework
+OpenCL.framework
+Accelerate.framework
+IOSurface.framework
+CoreVideo.framework
+Metal.framework
+CoreGraphics.framework
+```
+
+strings には以下が出ている。
+
+```text
+mct_jpeg_videotoolbox_encode
+jpeg_videotoolbox.cpp
+t6_metaljpeg_compress_texture_async
+t6_compress_yuv420
+t6_compress_yuv420_gpurle
+t6_compress_yuv420_gpu_dctquantrlehuff_whole_image
+jpegencode_dctquant_420
+jpegencode_dctquant_420_2mb_parallel_sbb
+jpegencode_dctquant_444_4b_parallel_sbb
+jpegencode_dctquant_rle_420
+jpegencode_rlehuffman_420_bytewise
+t6_upload_uncompressed_yuv420
+t6_upload_uncompressed_yuv444
+t6_submit_frame_surface_whole_screen_compressed
+t6_submit_frame_surface_with_compressed_dirty_rects
+MCTT6Device JPEG Encoder
+```
+
+したがって公式 Mac driver は ImageIO ではなく、VideoToolbox path と独自 Metal JPEG encoder / YUV420 compressor を持つと見るのが自然。信号機が公式 driver で滲みにくい理由は、単純な TurboJPEG 420 ではなく、Metal 上の YUV420 downsample / DCT / Huffman pipeline、または raw YUV upload path にある可能性が高い。
+
 address は主に次の 3 zone を回る。
 
 ```text
@@ -219,6 +292,16 @@ type7:
 
 type7 JPEG は fullsnap では画像として素直に復元できた。以前の「ブロック配置がランダムに見える」「YouTube から絵が取れない」問題は、少なくとも大部分が snaplen 不足による incomplete JPEG の副作用だった。
 
+YouTube の `1376x800` type7 は、直前 type4 zone から見ると常に以下の差分になった。
+
+```text
+delta_start = 0x3c000
+delta_end   = 0x1e000
+span        = 0x1e0000
+```
+
+pitch 2048 と仮定すると `delta_start` は `(x=0,y=120)` に相当する。`end_addr` は `type4_end + 0x1e000` なので、単純な `start + JPEG height` ではなく、type4 の framebuffer zone と同じ終端基準も混ざっている。
+
 YouTube fullsnap の replay は、`tools/t6_reassemble_video.py --export-payloads` で生成した manifest を `t6-send-type7 --replay-manifest-json` に渡せば type4/type7 混在シーケンスをそのまま送れる。
 
 生成例:
@@ -260,6 +343,58 @@ cargo run --features usb --bin t6-replay-video -- \
   --wait-interrupt-ms 100 \
   --sleep-ms 50
 ```
+
+### niconico fullsnap での type7
+
+YouTube と同じく、niconico 再生でも fullsnap では type7 JPEG を完全に復元できた。
+
+`captures/type7_niconico_comment_off_2s_fullsnap.pcap`:
+
+- complete transfers: 267
+- type4: 16
+- type7: 251
+- type7 JPEG:
+  - `832x480`: 152
+  - `832x800`: 35
+  - `832x544`: 2
+  - `1440x736`: 1
+  - `1920x56`: 61
+
+`captures/type7_niconico_comment_on_2s_fullsnap.pcap`:
+
+- complete transfers: 163
+- type4: 3
+- type7: 159
+- type7 JPEG:
+  - `832x480`: 138
+  - `832x544`: 2
+  - `1440x736`: 1
+  - `1920x56`: 18
+
+JPEG の中身を確認すると、`832x480` はコメント込みの動画領域そのもの、`1920x56` は Windows タスクバー領域、`1440x736` はブラウザ領域の初期大領域だった。
+
+直前 type4 zone からの差分はかなり安定している。
+
+```text
+832x480 / 832x544 / 832x800:
+  delta_start = 0x78260
+  delta_end   = 0x3c260
+  span        = 0x1c2000
+
+1920x56:
+  delta_start = 0x1e0000
+  delta_end   = 0xf0000
+  span        = 0x10e000
+
+1440x736:
+  delta_start = 0x0
+  delta_end   = 0x0
+  span        = 0x1fe000
+```
+
+pitch 2048 と仮定すると、`0x78260` は `(x=608,y=240)`、`0x1e0000` は `(x=0,y=960)` に相当する。niconico の `832x480` は画面上の動画プレイヤー位置と整合するため、type7 は任意 dirty rect というより「公式 driver が認識した動画/帯領域」を固定 address range へ送る経路と見るのが自然。
+
+一方、制御した小矩形・modal fade テストでは type7 が少ない、または出ない。したがって、macOS 側で汎用 dirty rect から type7 を生成するにはまだ情報不足。まずは「動画領域として扱う固定 tile」を生成/再生する実験に寄せる。
 
 ## Existing capture: `captures/mctt6.pcapng`
 
@@ -830,3 +965,141 @@ that the earlier BGR/RGB565 full-frame Linux path is not the right 1080p path.
 The next implementation target should be an EVDI/libusb-style user-space path,
 or at least a Linux kernel bulk sender that emits the same `VIDEO_FLIP_HEADER +
 JPEG + padding` payload.
+
+## 2026-06-21 公式 macOS ドライバ Ghidra 解析メモ
+
+対象:
+
+- `/Applications/USB Display.app/Contents/Resources/USB Display Device Driver.app/Contents/MacOS/USB Display Device Driver`
+- version: driver app 4.2.0
+- Ghidra 12.1.2 で x86_64 slice を import 済み。
+- project/output は `ghidra_projects/`, `ghidra_out/` に生成。再実行用 script は `ghidra_scripts/`。
+
+### 入口として有用な関数
+
+Ghidra 上の自動名なので再解析で変わる可能性はあるが、現時点の xref は以下。
+
+- `FUN_100030444`: `t6_compress_yuv420`
+- `FUN_100030b7c`: `t6_compress_yuv420_gpurle`
+- `FUN_100031b55`: `t6_metaljpeg_compress_texture_async`
+- `FUN_100032889`: `t6_compress_yuv420_gpu_dctquantrlehuff_whole_image`
+- `FUN_1000473ab`: `t6_submit_frame_surface_with_compressed_dirty_rects`
+- `FUN_1000487e0`: dirty rect encode completion callback
+- `FUN_1000489d7`: VRAM/fence request phase
+- `FUN_100048d32`: rect device submission phase
+- `FUN_10004947c`: compressed flip command submission
+- `FUN_1000b8d6a`: `syncDirtyRectsFromSurface` らしき大きい経路選択関数
+
+### 公式 macOS ドライバの画面送信経路
+
+公式ドライバは単純な ImageIO/JPEG 送信ではない。少なくとも以下の複数経路を持つ。
+
+- VideoToolbox JPEG encoder:
+  - `mct_jpeg_videotoolbox_encode`
+  - `mct_jpeg_videotoolbox_encoder`
+  - `t6_submit_frame_surface_whole_screen_compressed_vt_jpeg`
+- Metal / OpenCL 系の T6 専用 JPEG/YUV420 encoder:
+  - `t6_metaljpeg_compress_texture_async`
+  - `t6_compress_yuv420`
+  - `t6_compress_yuv420_gpurle`
+  - `t6_compress_yuv420_gpu_dctquantrlehuff_whole_image`
+- uncompressed YUV upload:
+  - `t6_upload_uncompressed_yuv420`
+  - `t6_upload_uncompressed_yuv444`
+- dirty rect compressed submission:
+  - `t6_submit_frame_surface_with_compressed_dirty_rects`
+  - rect ごとに encode completion -> VRAM/fence request -> device submission -> flip submission へ進む。
+
+`syncDirtyRectsFromSurface` らしき関数では、dirty rect がある通常経路で
+`t6_submit_frame_surface_with_compressed_dirty_rects` を呼ぶ分岐と、
+`this->vt_yuv420_encoder` を使う VideoToolbox 系分岐がある。つまり公式は
+「全画面 JPEG を毎回送る」だけではなく、dirty rect と T6 専用 GPU encoder を主経路にしている可能性が高い。
+
+### アラインメントと内部ブロック
+
+公式の T6 専用経路はアラインメント制約が強い。
+
+- `t6_compress_yuv420`
+  - `source_region.width() % 16 == 0`
+  - `source_region.height() % 16 == 0`
+- `t6_metaljpeg_compress_texture_async`
+  - `dev_update_rect.width() % 32 == 0`
+  - `dev_update_rect.height() % macroblock_size_px == 0`
+  - `macroblock_size_px` は引数上 `8 << yuv420_subsample` 相当。
+- `t6_compress_yuv420_gpu_dctquantrlehuff_whole_image`
+  - `source_region.width() % 64 == 0`
+  - `source_region.height() % 16 == 0`
+
+`t6_metaljpeg_compress_texture_async` は coeff / macroblock size / bytestream buffer を分けて扱う。
+420 系では macroblock あたりの係数 buffer 使用量が `0xc0 * num_macroblocks * 2`、
+bytestream spacing が `0x4e4 * num_macroblocks` らしい。420 でない場合は係数側 `0x180`、
+bytestream 側 `0x9c4` へ増える。
+
+### 420 なのに公式/Windows がきれいに見える理由の更新
+
+Windows/IP P JPEG と TurboJPEG q95 は量子化テーブルが一致していた。
+
+- Windows IPP q95: luma sum 369, chroma sum 558
+- TurboJPEG q95 420: luma sum 369, chroma sum 558
+
+したがって、Windows がきれいに見える理由は量子化テーブルではなさそう。
+公式 macOS の kernel source から見ると、差分候補は以下。
+
+- RGB/BGRX から YUV への変換と 420 downsample の実装差。
+- 公式 kernel は Cb/Cr を 2x2 平均している:
+  - Y: `0.299 R + 0.587 G + 0.114 B - 128`
+  - Cb: `-0.168736 R - 0.331264 G + 0.5 B`
+  - Cr: `0.5 R - 0.418688 G - 0.081312 B`
+  - Cb/Cr は 4 pixel の合計に係数 `* 0.25f` をかける。
+- DCT/quantize を GPU kernel 内で直接行い、係数を zig-zag して RLE/Huffman へ渡している。
+- 公式は type4/full frame JPEG だけでなく、type7/dirty rect 風の T6 専用送信経路も持つ。
+
+次に試す価値が高いもの:
+
+1. Rust 側の 420 変換を公式 kernel と同じ 2x2 average / BT.601 係数に寄せる。
+2. TurboJPEG に渡す入力を RGB 直接ではなく、公式相当の Y/Cb/Cr plane から作れるか確認する。
+3. full frame JPEG の改善だけで限界がある場合、type7 はいったん低優先度でも、公式 dirty rect 送信の構造メモは維持する。
+
+### Ghidra 作業メモ
+
+Ghidra 起動:
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ghidraRun
+```
+
+Headless import:
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+/opt/homebrew/Cellar/ghidra/12.1.2/libexec/support/analyzeHeadless \
+  ghidra_projects USBDisplayDriver \
+  -import "/Applications/USB Display.app/Contents/Resources/USB Display Device Driver.app/Contents/MacOS/USB Display Device Driver" \
+  -overwrite \
+  -analysisTimeoutPerFile 1200 \
+  -log ghidra_projects/import.log
+```
+
+関連文字列 xref:
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+/opt/homebrew/Cellar/ghidra/12.1.2/libexec/support/analyzeHeadless \
+  ghidra_projects USBDisplayDriver \
+  -process "USB Display Device Driver" \
+  -scriptPath ghidra_scripts \
+  -postScript T6StringXrefs.java \
+  -noanalysis
+```
+
+関数 decompile:
+
+```sh
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+/opt/homebrew/Cellar/ghidra/12.1.2/libexec/support/analyzeHeadless \
+  ghidra_projects USBDisplayDriver \
+  -process "USB Display Device Driver" \
+  -scriptPath ghidra_scripts \
+  -postScript T6DecompileAddrs.java 100030444 100031b55 100032889 1000473ab 1000b8d6a \
+  -noanalysis
+```

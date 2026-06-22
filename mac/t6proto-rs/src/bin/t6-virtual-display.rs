@@ -13,8 +13,8 @@ use image::RgbImage;
 use t6proto::usb::T6Device;
 use t6proto::{
     BulkDmaHeader, BulkTransferChunk, DEFAULT_MAX_BULK_PACKET_SIZE, FrameScheduler,
-    JpegFramePacket, RawFramePacket, VIDEO_COLOR_NV12, VIDEO_COLOR_YUV444, VIDEO_COLOR_YV12,
-    VIDEO_FLAG_RESET_JPEG, VramLayout,
+    JpegFramePacket, RawFramePacket, Type7JpegTilePacket, VIDEO_COLOR_NV12, VIDEO_COLOR_YUV444,
+    VIDEO_COLOR_YV12, VIDEO_FLAG_RESET_JPEG, VramLayout,
 };
 use turbojpeg::Subsamp;
 use turbojpeg_sys as tj;
@@ -77,6 +77,22 @@ unsafe extern "C" {
     ) -> isize;
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn t6_vt_jpeg_encoder_create(width: usize, height: usize, quality: f32) -> *mut c_void;
+    fn t6_vt_jpeg_encoder_destroy(encoder: *mut c_void);
+    fn t6_vt_jpeg_encoder_encode_bgra(
+        encoder: *mut c_void,
+        bgra: *const u8,
+        width: usize,
+        height: usize,
+        stride: usize,
+        quality: f32,
+        jpeg_data: *mut *const u8,
+        jpeg_len: *mut usize,
+    ) -> i32;
+}
+
 #[derive(Clone, Debug)]
 struct Options {
     display_index: u8,
@@ -89,6 +105,7 @@ struct Options {
     adaptive_quality: bool,
     min_quality: i32,
     subsamp: JpegSubsampling,
+    jpeg_encoder: JpegEncoder,
     jpeg_target: JpegTarget,
     chroma_mode: ChromaMode,
     yuv_matrix: YuvMatrix,
@@ -102,6 +119,7 @@ struct Options {
     profile: bool,
     async_send: bool,
     drop_late_frames: bool,
+    unsafe_generated_type7: bool,
     dirty_mode: DirtyMode,
     dry_run: bool,
     ram_size_mb: Option<u8>,
@@ -110,6 +128,7 @@ struct Options {
     dump_interrupts: u32,
     max_packet_size: u32,
     dump_first_frame: Option<PathBuf>,
+    dump_first_frame_delay_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,8 +147,16 @@ enum JpegSubsampling {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JpegEncoder {
+    TurboBgra,
+    T6Yuv420,
+    VideoToolbox,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Transport {
     Jpeg,
+    JpegType7,
     Nv12,
     Rgb24,
     Yv12,
@@ -227,9 +254,13 @@ struct SenderState {
     device: Option<T6Device>,
     scheduler: FrameScheduler,
     jpeg_compressor: Option<FastJpegCompressor>,
+    vt_jpeg_compressor: Option<VtJpegCompressor>,
     rgb_scratch: Vec<u8>,
     bgra_scratch: Vec<u8>,
     dirty_bgra_scratch: Vec<u8>,
+    y_plane_scratch: Vec<u8>,
+    u_plane_scratch: Vec<u8>,
+    v_plane_scratch: Vec<u8>,
     current_quality: i32,
     remaining_interrupt_dumps: u32,
     next_fence_id: u32,
@@ -262,6 +293,89 @@ struct FastJpegCompressor {
 }
 
 unsafe impl Send for FastJpegCompressor {}
+
+struct VtJpegCompressor {
+    encoder: *mut c_void,
+    width: usize,
+    height: usize,
+}
+
+unsafe impl Send for VtJpegCompressor {}
+
+impl VtJpegCompressor {
+    #[cfg(target_os = "macos")]
+    fn new(width: usize, height: usize, quality: i32) -> Result<Self, Box<dyn Error>> {
+        let encoder = unsafe { t6_vt_jpeg_encoder_create(width, height, quality_to_vt(quality)) };
+        if encoder.is_null() {
+            return Err("t6_vt_jpeg_encoder_create failed".into());
+        }
+        Ok(Self {
+            encoder,
+            width,
+            height,
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn new(_width: usize, _height: usize, _quality: i32) -> Result<Self, Box<dyn Error>> {
+        Err("VideoToolbox JPEG encoder is only supported on macOS".into())
+    }
+
+    fn compress_bgra_ptr(
+        &mut self,
+        bgra: *const u8,
+        width: usize,
+        pitch: usize,
+        height: usize,
+        quality: i32,
+    ) -> Result<&[u8], Box<dyn Error>> {
+        if width != self.width || height != self.height {
+            return Err("VideoToolbox JPEG encoder dimensions changed".into());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut jpeg_data: *const u8 = ptr::null();
+            let mut jpeg_len = 0usize;
+            let status = unsafe {
+                t6_vt_jpeg_encoder_encode_bgra(
+                    self.encoder,
+                    bgra,
+                    width,
+                    height,
+                    pitch,
+                    quality_to_vt(quality),
+                    &mut jpeg_data,
+                    &mut jpeg_len,
+                )
+            };
+            if status != 0 {
+                return Err(format!("VideoToolbox JPEG encode failed: {status}").into());
+            }
+            if jpeg_data.is_null() || jpeg_len == 0 {
+                return Err("VideoToolbox JPEG encode returned empty output".into());
+            }
+            Ok(unsafe { std::slice::from_raw_parts(jpeg_data, jpeg_len) })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (bgra, pitch, quality);
+            Err("VideoToolbox JPEG encoder is only supported on macOS".into())
+        }
+    }
+}
+
+impl Drop for VtJpegCompressor {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            t6_vt_jpeg_encoder_destroy(self.encoder);
+        }
+    }
+}
+
+fn quality_to_vt(quality: i32) -> f32 {
+    (quality.clamp(1, 100) as f32) / 100.0
+}
 
 impl FastJpegCompressor {
     fn new(quality: i32, subsamp: Subsamp) -> Result<Self, Box<dyn Error>> {
@@ -301,6 +415,60 @@ impl FastJpegCompressor {
             tj::TJPF_TJPF_BGRA as i32,
             quality,
         )
+    }
+
+    fn compress_t6_yuv420_bgra_ptr(
+        &mut self,
+        bgra: *const u8,
+        width: usize,
+        pitch: usize,
+        height: usize,
+        quality: i32,
+        y_plane: &mut Vec<u8>,
+        u_plane: &mut Vec<u8>,
+        v_plane: &mut Vec<u8>,
+    ) -> Result<&[u8], Box<dyn Error>> {
+        if width % 2 != 0 || height % 2 != 0 {
+            return Err("t6-yuv420 JPEG encoder requires even width and height".into());
+        }
+        if self.subsamp != Subsamp::Sub2x2 {
+            return Err("t6-yuv420 JPEG encoder requires --subsamp 420".into());
+        }
+        if self.configured_quality != quality {
+            self.set_param(tj::TJPARAM_TJPARAM_QUALITY, quality)?;
+            self.configured_quality = quality;
+        }
+        self.ensure_output_capacity(width, height)?;
+        fill_t6_yuv420_from_bgra(bgra, width, pitch, height, y_plane, u_plane, v_plane);
+
+        let chroma_width = width / 2;
+        let planes = [y_plane.as_ptr(), u_plane.as_ptr(), v_plane.as_ptr()];
+        let strides = [
+            width.try_into()?,
+            chroma_width.try_into()?,
+            chroma_width.try_into()?,
+        ];
+        let mut output_len = self.output_capacity as u64;
+        let result = unsafe {
+            tj::tj3CompressFromYUVPlanes8(
+                self.handle,
+                planes.as_ptr(),
+                width.try_into()?,
+                strides.as_ptr(),
+                height.try_into()?,
+                &mut self.output,
+                &mut output_len,
+            )
+        };
+        self.output_len = output_len.try_into()?;
+        if result != 0 {
+            return Err(self.error().into());
+        }
+        if self.output.is_null() {
+            return Err("tj3CompressFromYUVPlanes8 returned null output".into());
+        }
+
+        Ok(unsafe { std::slice::from_raw_parts(self.output, self.output_len) })
     }
 
     fn compress_pixels(
@@ -766,10 +934,25 @@ fn build_sender_state(
     ram_size_mb: u8,
 ) -> Result<SenderState, Box<dyn Error>> {
     let layout = VramLayout::two_port_1080p_secondary(ram_size_mb);
-    let jpeg_compressor = if options.transport == Transport::Jpeg {
+    let jpeg_compressor = if matches!(options.transport, Transport::Jpeg | Transport::JpegType7)
+        && options.jpeg_encoder != JpegEncoder::VideoToolbox
+    {
         Some(FastJpegCompressor::new(
             options.quality,
             options.subsamp.turbojpeg(),
+        )?)
+    } else {
+        None
+    };
+    let vt_jpeg_compressor = if matches!(options.transport, Transport::Jpeg)
+        && options.jpeg_encoder == JpegEncoder::VideoToolbox
+    {
+        let (output_width, output_height) =
+            options.rotate.output_size(options.width, options.height);
+        Some(VtJpegCompressor::new(
+            usize::from(output_width),
+            usize::from(output_height),
+            options.quality,
         )?)
     } else {
         None
@@ -796,9 +979,13 @@ fn build_sender_state(
         device,
         scheduler: FrameScheduler::new(layout),
         jpeg_compressor,
+        vt_jpeg_compressor,
         rgb_scratch: Vec::new(),
         bgra_scratch: Vec::new(),
         dirty_bgra_scratch: Vec::new(),
+        y_plane_scratch: Vec::new(),
+        u_plane_scratch: Vec::new(),
+        v_plane_scratch: Vec::new(),
         current_quality,
         remaining_interrupt_dumps,
         next_fence_id: 1,
@@ -833,7 +1020,7 @@ fn run_sync(
     }
 
     println!(
-        "Started virtual display id={} capture={}x{} output={}x{} rotate={:?} fps={} transport={:?} capture_format={:?} quality={} subsamp={:?} dry_run={}",
+        "Started virtual display id={} capture={}x{} output={}x{} rotate={:?} fps={} transport={:?} capture_format={:?} quality={} subsamp={:?} jpeg_encoder={:?} dry_run={}",
         display_id,
         unsafe { (*state_ptr).options.width },
         unsafe { (*state_ptr).options.height },
@@ -857,6 +1044,7 @@ fn run_sync(
         unsafe { (*state_ptr).options.capture_format },
         unsafe { (*state_ptr).options.quality },
         unsafe { (*state_ptr).options.subsamp },
+        unsafe { (*state_ptr).options.jpeg_encoder },
         unsafe { (*state_ptr).options.dry_run }
     );
     println!("Stop with Ctrl-C, or use --frames N for a bounded run.");
@@ -934,7 +1122,7 @@ fn run_async(
 
     let (output_width, output_height) = options.rotate.output_size(options.width, options.height);
     println!(
-        "Started virtual display id={} capture={}x{} output={}x{} rotate={:?} fps={} transport={:?} capture_format={:?} quality={} subsamp={:?} async_send=true dry_run={}",
+        "Started virtual display id={} capture={}x{} output={}x{} rotate={:?} fps={} transport={:?} capture_format={:?} quality={} subsamp={:?} jpeg_encoder={:?} async_send=true dry_run={}",
         display_id,
         options.width,
         options.height,
@@ -946,6 +1134,7 @@ fn run_async(
         options.capture_format,
         options.quality,
         options.subsamp,
+        options.jpeg_encoder,
         options.dry_run
     );
     println!("Stop with Ctrl-C, or use --frames N for a bounded run.");
@@ -1322,7 +1511,10 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
 
     let (output_width, output_height) = options.rotate.output_size(options.width, options.height);
     if let Some(path) = &options.dump_first_frame {
-        if !state.first_frame_dumped {
+        if !state.first_frame_dumped
+            && state.started_at.elapsed()
+                >= Duration::from_millis(options.dump_first_frame_delay_ms)
+        {
             let rgb = copy_bgra_to_rgb(
                 frame.plane0,
                 expected_width,
@@ -1332,7 +1524,11 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             );
             rgb.save(path)?;
             state.first_frame_dumped = true;
-            println!("Dumped first frame to {}", path.display());
+            println!(
+                "Dumped first frame to {} after {:.3}s",
+                path.display(),
+                state.started_at.elapsed().as_secs_f64()
+            );
         }
     }
 
@@ -1349,6 +1545,19 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 )?;
             }
             send_full_jpeg_frame(
+                state,
+                frame,
+                expected_width,
+                expected_height,
+                output_width,
+                output_height,
+                frame_started,
+                &mut profile,
+            )?
+        }
+        Transport::JpegType7 => {
+            ensure_bgra_capture(frame)?;
+            send_jpeg_type7_frame(
                 state,
                 frame,
                 expected_width,
@@ -1647,18 +1856,49 @@ fn send_full_jpeg_frame(
     }
     let fence_id = next_fence_id(state);
     let encode_started = Instant::now();
-    let jpeg = {
-        let compressor = state
-            .jpeg_compressor
-            .as_mut()
-            .ok_or("JPEG compressor is not initialized")?;
-        compressor.compress_bgra_ptr(
-            jpeg_pixels,
-            usize::from(output_width),
-            jpeg_pitch,
-            usize::from(output_height),
-            state.current_quality,
-        )?
+    let jpeg = match options.jpeg_encoder {
+        JpegEncoder::TurboBgra => {
+            let compressor = state
+                .jpeg_compressor
+                .as_mut()
+                .ok_or("JPEG compressor is not initialized")?;
+            compressor.compress_bgra_ptr(
+                jpeg_pixels,
+                usize::from(output_width),
+                jpeg_pitch,
+                usize::from(output_height),
+                state.current_quality,
+            )?
+        }
+        JpegEncoder::T6Yuv420 => {
+            let compressor = state
+                .jpeg_compressor
+                .as_mut()
+                .ok_or("JPEG compressor is not initialized")?;
+            compressor.compress_t6_yuv420_bgra_ptr(
+                jpeg_pixels,
+                usize::from(output_width),
+                jpeg_pitch,
+                usize::from(output_height),
+                state.current_quality,
+                &mut state.y_plane_scratch,
+                &mut state.u_plane_scratch,
+                &mut state.v_plane_scratch,
+            )?
+        }
+        JpegEncoder::VideoToolbox => {
+            let compressor = state
+                .vt_jpeg_compressor
+                .as_mut()
+                .ok_or("VideoToolbox JPEG compressor is not initialized")?;
+            compressor.compress_bgra_ptr(
+                jpeg_pixels,
+                usize::from(output_width),
+                jpeg_pitch,
+                usize::from(output_height),
+                state.current_quality,
+            )?
+        }
     };
     let jpeg_len = jpeg.len();
     profile.encode = encode_started.elapsed();
@@ -1703,6 +1943,172 @@ fn send_full_jpeg_frame(
         addresses.cmd_addr,
         addresses.fb_addr,
         addresses.reset_jpeg,
+        fence_id,
+    ))
+}
+
+fn send_jpeg_type7_frame(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    expected_width: usize,
+    expected_height: usize,
+    output_width: u16,
+    output_height: u16,
+    frame_started: Instant,
+    profile: &mut ProfileSample,
+) -> Result<(usize, usize, u32, u32, bool, u32), Box<dyn Error>> {
+    if !state.options.unsafe_generated_type7 {
+        return send_full_jpeg_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            frame_started,
+            profile,
+        );
+    }
+
+    let dirty_bbox = clamped_dirty_bbox(frame.dirty, expected_width, expected_height);
+    let fullish = profile.dirty_bbox_ratio >= 0.80;
+    let refresh_frame = state.sent_frames == 0 || state.sent_frames % 30 == 0;
+    if state.current_display_fb_addr.is_none() || dirty_bbox.is_none() || fullish || refresh_frame {
+        return send_full_jpeg_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            frame_started,
+            profile,
+        );
+    }
+
+    let (dirty_x, dirty_y, dirty_width, dirty_height) = dirty_bbox.expect("checked above");
+    let (_out_x, out_y, _out_width, out_height) = rotate_bbox(
+        dirty_x,
+        dirty_y,
+        dirty_width,
+        dirty_height,
+        expected_width,
+        expected_height,
+        state.options.rotate,
+    );
+    let out_w = usize::from(output_width);
+    let out_h = usize::from(output_height);
+    let band_y = (out_y / 8) * 8;
+    let band_end = align_usize((out_y + out_height).min(out_h), 8).min(out_h);
+    let band_height = band_end.saturating_sub(band_y);
+    if band_height == 0 || out_w == 0 {
+        return Ok((0, 0, 0, 0, false, 0));
+    }
+    let band_ratio = band_height as f64 / out_h.max(1) as f64;
+    if band_ratio < 0.20 || band_ratio > 0.90 {
+        return send_full_jpeg_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            frame_started,
+            profile,
+        );
+    }
+
+    let options = state.options.clone();
+    let convert_started = Instant::now();
+    let (jpeg_pixels, jpeg_pitch) = if options.rotate == Rotation::Deg0 {
+        (frame.plane0, frame.plane0_stride)
+    } else {
+        let (rotated_width, rotated_height, rotated_stride) = rotate_bgra_with_vimage(
+            frame.plane0,
+            expected_width,
+            expected_height,
+            frame.plane0_stride,
+            options.rotate,
+            &mut state.bgra_scratch,
+        )?;
+        debug_assert_eq!(rotated_width, out_w);
+        debug_assert_eq!(rotated_height, out_h);
+        (state.bgra_scratch.as_ptr(), rotated_stride)
+    };
+    crop_bgra_bbox(
+        jpeg_pixels,
+        jpeg_pitch,
+        0,
+        band_y,
+        out_w,
+        band_height,
+        &mut state.dirty_bgra_scratch,
+    );
+    profile.convert = convert_started.elapsed();
+    let frame_interval = state.frame_interval;
+    if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
+        drop_late_frame(state, *profile, frame_started);
+        return Ok((0, 0, 0, 0, false, 0));
+    }
+
+    let fence_id = next_fence_id(state);
+    let encode_started = Instant::now();
+    let jpeg = {
+        let compressor = state
+            .jpeg_compressor
+            .as_mut()
+            .ok_or("JPEG compressor is not initialized")?;
+        compressor.compress_bgra_ptr(
+            state.dirty_bgra_scratch.as_ptr(),
+            out_w,
+            out_w * 4,
+            band_height,
+            state.current_quality,
+        )?
+    };
+    let jpeg_len = jpeg.len();
+    profile.encode = encode_started.elapsed();
+    if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
+        drop_late_frame(state, *profile, frame_started);
+        return Ok((0, 0, 0, 0, false, 0));
+    }
+
+    let packet_started = Instant::now();
+    let fb_addr = state
+        .current_display_fb_addr
+        .ok_or("type7 has no current framebuffer address")?;
+    const TYPE7_PITCH: u32 = 2048;
+    let start_addr = fb_addr.saturating_add((band_y as u32).saturating_mul(TYPE7_PITCH));
+    let end_addr = fb_addr.saturating_add((band_end as u32).saturating_mul(TYPE7_PITCH));
+    let canvas_height = output_width.max(output_height);
+    let payload_len = 48usize.saturating_add(jpeg_len);
+    let addresses = state.scheduler.next_jpeg_payload(payload_len, fb_addr);
+    let packet = Type7JpegTilePacket::new(
+        &jpeg,
+        addresses.cmd_addr,
+        fence_id,
+        output_width,
+        band_height as u16,
+        output_width,
+        canvas_height,
+        start_addr,
+        end_addr,
+    );
+    let chunks = packet.bulk_chunks(options.max_packet_size);
+    profile.packet = packet_started.elapsed();
+    if let Some(device) = &state.device {
+        let usb_timing = send_chunks_with_context(device, &chunks, "jpeg-type7")?;
+        profile.usb_header = usb_timing.header;
+        profile.usb_data = usb_timing.data;
+        profile.usb = usb_timing.total();
+    }
+    profile.dirty_probe_payload_bytes = jpeg_len;
+    Ok((
+        packet.payload.len(),
+        chunks.len(),
+        addresses.cmd_addr,
+        fb_addr,
+        false,
         fence_id,
     ))
 }
@@ -1964,7 +2370,9 @@ fn resync_next_send_at(state: &mut SenderState, now: Instant) {
 
 fn adapt_jpeg_quality(state: &mut SenderState, total: Duration) {
     let options = &state.options;
-    if options.transport != Transport::Jpeg || !options.adaptive_quality {
+    if !matches!(options.transport, Transport::Jpeg | Transport::JpegType7)
+        || !options.adaptive_quality
+    {
         return;
     }
 
@@ -2447,6 +2855,64 @@ fn bgr_to_yuv(r: u8, g: u8, b: u8, matrix: YuvMatrix, range: YuvRange) -> (u8, u
     (clamp_u8(y), clamp_u8(u), clamp_u8(v))
 }
 
+fn fill_t6_yuv420_from_bgra(
+    bgra: *const u8,
+    width: usize,
+    pitch: usize,
+    height: usize,
+    y_plane: &mut Vec<u8>,
+    u_plane: &mut Vec<u8>,
+    v_plane: &mut Vec<u8>,
+) {
+    y_plane.resize(width * height, 0);
+    let chroma_width = width / 2;
+    let chroma_height = height / 2;
+    u_plane.resize(chroma_width * chroma_height, 0);
+    v_plane.resize(chroma_width * chroma_height, 0);
+
+    for y in 0..height {
+        let row = unsafe { std::slice::from_raw_parts(bgra.add(y * pitch), width * 4) };
+        for x in 0..width {
+            let i = x * 4;
+            let b = row[i] as f32;
+            let g = row[i + 1] as f32;
+            let r = row[i + 2] as f32;
+            y_plane[y * width + x] = clamp_f32_u8((0.299 * r) + (0.587 * g) + (0.114 * b));
+        }
+    }
+
+    for cy in 0..chroma_height {
+        let row0 = unsafe { std::slice::from_raw_parts(bgra.add((cy * 2) * pitch), width * 4) };
+        let row1 = unsafe { std::slice::from_raw_parts(bgra.add((cy * 2 + 1) * pitch), width * 4) };
+        for cx in 0..chroma_width {
+            let x = cx * 2;
+            let i0 = x * 4;
+            let i1 = (x + 1) * 4;
+            let b_sum = row0[i0] as f32 + row0[i1] as f32 + row1[i0] as f32 + row1[i1] as f32;
+            let g_sum = row0[i0 + 1] as f32
+                + row0[i1 + 1] as f32
+                + row1[i0 + 1] as f32
+                + row1[i1 + 1] as f32;
+            let r_sum = row0[i0 + 2] as f32
+                + row0[i1 + 2] as f32
+                + row1[i0 + 2] as f32
+                + row1[i1 + 2] as f32;
+            let r = r_sum * 0.25;
+            let g = g_sum * 0.25;
+            let b = b_sum * 0.25;
+            let u = (-0.168736 * r) - (0.331264 * g) + (0.5 * b) + 128.0;
+            let v = (0.5 * r) - (0.418688 * g) - (0.081312 * b) + 128.0;
+            let ci = cy * chroma_width + cx;
+            u_plane[ci] = clamp_f32_u8(u);
+            v_plane[ci] = clamp_f32_u8(v);
+        }
+    }
+}
+
+fn clamp_f32_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
 fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
@@ -2592,6 +3058,47 @@ fn rotate_bgra_with_vimage(
     Ok((output_width, output_height, output_stride))
 }
 
+fn rotate_bbox(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    frame_width: usize,
+    frame_height: usize,
+    rotation: Rotation,
+) -> (usize, usize, usize, usize) {
+    let x1 = x;
+    let y1 = y;
+    let x2 = x.saturating_add(width).saturating_sub(1);
+    let y2 = y.saturating_add(height).saturating_sub(1);
+    let corners = [
+        output_coordinate(x1, y1, frame_width, frame_height, rotation),
+        output_coordinate(x2, y1, frame_width, frame_height, rotation),
+        output_coordinate(x1, y2, frame_width, frame_height, rotation),
+        output_coordinate(x2, y2, frame_width, frame_height, rotation),
+    ];
+    let min_x = corners.iter().map(|(cx, _)| *cx).min().unwrap_or(0);
+    let max_x = corners.iter().map(|(cx, _)| *cx).max().unwrap_or(min_x);
+    let min_y = corners.iter().map(|(_, cy)| *cy).min().unwrap_or(0);
+    let max_y = corners.iter().map(|(_, cy)| *cy).max().unwrap_or(min_y);
+    (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+}
+
+fn output_coordinate(
+    src_x: usize,
+    src_y: usize,
+    width: usize,
+    height: usize,
+    rotation: Rotation,
+) -> (usize, usize) {
+    match rotation {
+        Rotation::Deg0 => (src_x, src_y),
+        Rotation::Deg90 => (height - 1 - src_y, src_x),
+        Rotation::Deg180 => (width - 1 - src_x, height - 1 - src_y),
+        Rotation::Deg270 => (src_y, width - 1 - src_x),
+    }
+}
+
 fn source_coordinate(
     out_x: usize,
     out_y: usize,
@@ -2618,6 +3125,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut adaptive_quality = false;
     let mut min_quality = 85;
     let mut subsamp = JpegSubsampling::Yuv420;
+    let mut jpeg_encoder = JpegEncoder::TurboBgra;
     let mut jpeg_target = JpegTarget::Nv12;
     let mut chroma_mode = ChromaMode::Average;
     let mut yuv_matrix = YuvMatrix::Bt601;
@@ -2631,6 +3139,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut profile = false;
     let mut async_send = false;
     let mut drop_late_frames = false;
+    let mut unsafe_generated_type7 = false;
     let mut dirty_mode = DirtyMode::Log;
     let mut dry_run = false;
     let mut ram_size_mb = None;
@@ -2639,6 +3148,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut dump_interrupts = 0;
     let mut max_packet_size = DEFAULT_MAX_BULK_PACKET_SIZE;
     let mut dump_first_frame = None;
+    let mut dump_first_frame_delay_ms = 0;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -2655,6 +3165,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--adaptive-quality" => adaptive_quality = true,
             "--min-quality" => min_quality = next_value(&mut args, "--min-quality")?.parse()?,
             "--subsamp" => subsamp = parse_subsampling(&next_value(&mut args, "--subsamp")?)?,
+            "--jpeg-encoder" => {
+                jpeg_encoder = parse_jpeg_encoder(&next_value(&mut args, "--jpeg-encoder")?)?
+            }
             "--jpeg-target" => {
                 jpeg_target = parse_jpeg_target(&next_value(&mut args, "--jpeg-target")?)?
             }
@@ -2678,6 +3191,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--profile" => profile = true,
             "--async-send" => async_send = true,
             "--drop-late-frames" => drop_late_frames = true,
+            "--unsafe-generated-type7" => unsafe_generated_type7 = true,
             "--dirty-mode" => {
                 dirty_mode = parse_dirty_mode(&next_value(&mut args, "--dirty-mode")?)?
             }
@@ -2696,6 +3210,10 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--dump-first-frame" => {
                 dump_first_frame = Some(PathBuf::from(next_value(&mut args, "--dump-first-frame")?))
             }
+            "--dump-first-frame-delay-ms" => {
+                dump_first_frame_delay_ms =
+                    next_value(&mut args, "--dump-first-frame-delay-ms")?.parse()?
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -2713,6 +3231,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     if min_quality > quality {
         return Err("--min-quality must be less than or equal to --quality".into());
     }
+    if jpeg_encoder == JpegEncoder::T6Yuv420 && subsamp != JpegSubsampling::Yuv420 {
+        return Err("--jpeg-encoder t6-yuv420 requires --subsamp 420".into());
+    }
+    if jpeg_encoder == JpegEncoder::VideoToolbox && transport != Transport::Jpeg {
+        return Err("--jpeg-encoder videotoolbox currently requires --transport jpeg".into());
+    }
 
     Ok(Options {
         display_index,
@@ -2725,6 +3249,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         adaptive_quality,
         min_quality,
         subsamp,
+        jpeg_encoder,
         jpeg_target,
         chroma_mode,
         yuv_matrix,
@@ -2738,6 +3263,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         profile,
         async_send,
         drop_late_frames,
+        unsafe_generated_type7,
         dirty_mode,
         dry_run,
         ram_size_mb,
@@ -2746,6 +3272,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         dump_interrupts,
         max_packet_size,
         dump_first_frame,
+        dump_first_frame_delay_ms,
     })
 }
 
@@ -2765,6 +3292,15 @@ fn parse_jpeg_target(value: &str) -> Result<JpegTarget, Box<dyn Error>> {
         "yv12" => Ok(JpegTarget::Yv12),
         "yuv444" => Ok(JpegTarget::Yuv444),
         _ => Err("--jpeg-target must be one of nv12, yv12, yuv444".into()),
+    }
+}
+
+fn parse_jpeg_encoder(value: &str) -> Result<JpegEncoder, Box<dyn Error>> {
+    match value {
+        "turbo-bgra" | "turbo" => Ok(JpegEncoder::TurboBgra),
+        "t6-yuv420" => Ok(JpegEncoder::T6Yuv420),
+        "videotoolbox" | "vt" => Ok(JpegEncoder::VideoToolbox),
+        _ => Err("--jpeg-encoder must be one of turbo-bgra, t6-yuv420, videotoolbox".into()),
     }
 }
 
@@ -2813,11 +3349,12 @@ fn parse_chroma_mode(value: &str) -> Result<ChromaMode, Box<dyn Error>> {
 fn parse_transport(value: &str) -> Result<Transport, Box<dyn Error>> {
     match value {
         "jpeg" => Ok(Transport::Jpeg),
+        "jpeg-type7" | "type7" => Ok(Transport::JpegType7),
         "nv12" => Ok(Transport::Nv12),
         "rgb24" => Ok(Transport::Rgb24),
         "yv12" => Ok(Transport::Yv12),
         "yuv444" => Ok(Transport::Yuv444),
-        _ => Err("--transport must be one of jpeg, nv12, rgb24, yv12, yuv444".into()),
+        _ => Err("--transport must be one of jpeg, jpeg-type7, nv12, rgb24, yv12, yuv444".into()),
     }
 }
 
@@ -2872,6 +3409,8 @@ Options:\n\
     --adaptive-quality      Dynamically lower JPEG quality when frame time exceeds the fps budget\n\
     --min-quality N         Minimum adaptive JPEG quality, default 85\n\
     --subsamp 420|422|444   JPEG chroma subsampling, default 420\n\
+    --jpeg-encoder turbo-bgra|t6-yuv420|videotoolbox\n\
+                            JPEG encoder input path, default turbo-bgra\n\
     --jpeg-target nv12|yv12|yuv444\n\
                             Target format for JPEG decoder output, default nv12\n\
     --chroma-mode average|saturated|top-left\n\
@@ -2883,7 +3422,7 @@ Options:\n\
                             CGDisplayStream capture pixel format, default bgra\n\
     --raw-bulk fragmented|single\n\
                             Raw nv12/yv12/rgb24 USB transfer mode, default fragmented\n\
-    --transport jpeg|nv12|rgb24|yv12|yuv444\n\
+    --transport jpeg|jpeg-type7|nv12|rgb24|yv12|yuv444\n\
                             Frame transport, default jpeg\n\
     --ready                 Send software-ready before capture\n\
     --power-on              Send monitor power-on before capture\n\
@@ -2891,6 +3430,8 @@ Options:\n\
     --profile               Print average convert/encode/packet/USB timings every 60 sent frames\n\
     --async-send            Copy latest captured frame in the callback and send from a worker thread\n\
     --drop-late-frames      Drop JPEG frames after encode if they already missed the frame budget\n\
+    --unsafe-generated-type7\n\
+                            Enable generated type7 dirty JPEG updates. Experimental; can corrupt display state\n\
     --dirty-mode off|log|bbox|tile-send\n\
                             Dirty rect profiling mode, default log. bbox/tile-send crop-encode dirty rect tiles for measurement only\n\
     --dry-run               Capture/encode/packetize but do not open USB or send\n\
@@ -2899,7 +3440,9 @@ Options:\n\
     --wait-interrupt-ms N   After each sent frame, read display interrupts for up to N ms, default 0\n\
     --dump-interrupts N     Print the first N raw interrupt packets; use with --wait-interrupt-ms\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
-    --dump-first-frame PATH Save the first captured BGRA frame after RGB conversion"
+    --dump-first-frame PATH Save a captured BGRA frame after RGB conversion\n\
+    --dump-first-frame-delay-ms N\n\
+                            Wait at least N ms before saving --dump-first-frame"
     );
 }
 

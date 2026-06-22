@@ -17,6 +17,8 @@ __pycache__/
 *.py[cod]
 mac/t6proto/build/
 mac/t6proto-rs/target/
+ghidra_projects/
+ghidra_out/
 
 # Generated capture images and local visual reports
 *.jpg
