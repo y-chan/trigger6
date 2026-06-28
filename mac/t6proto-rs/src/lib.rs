@@ -517,8 +517,8 @@ pub struct Type4Mode6SetupHeader {
 }
 
 impl Type4Mode6SetupHeader {
-    pub fn new_with_format(
-        payload_len: usize,
+    pub fn new_with_data_len(
+        data_len: usize,
         sequence: u32,
         canvas_width: u16,
         canvas_height: u16,
@@ -529,7 +529,7 @@ impl Type4Mode6SetupHeader {
     ) -> Self {
         Self {
             video_type: 4,
-            data_len: payload_len.saturating_sub(TYPE4_MODE6_SETUP_HEADER_SIZE) as u32,
+            data_len: data_len as u32,
             sequence,
             mode: 6,
             canvas: (u32::from(canvas_height) << 16) | u32::from(canvas_width),
@@ -541,6 +541,28 @@ impl Type4Mode6SetupHeader {
             reserved2: 0,
             reserved3: 0,
         }
+    }
+
+    pub fn new_with_format(
+        payload_len: usize,
+        sequence: u32,
+        canvas_width: u16,
+        canvas_height: u16,
+        base0_addr: u32,
+        base1_addr: u32,
+        base2_addr: u32,
+        image_format: u32,
+    ) -> Self {
+        Self::new_with_data_len(
+            payload_len.saturating_sub(TYPE4_MODE6_SETUP_HEADER_SIZE),
+            sequence,
+            canvas_width,
+            canvas_height,
+            base0_addr,
+            base1_addr,
+            base2_addr,
+            image_format,
+        )
     }
 
     pub fn jpeg(
@@ -599,7 +621,7 @@ pub struct Type7JpegTileHeader {
 }
 
 impl Type7JpegTileHeader {
-    pub fn new_with_format(
+    pub fn new_with_data_len(
         data_len: usize,
         sequence: u32,
         width: u16,
@@ -625,6 +647,32 @@ impl Type7JpegTileHeader {
             reserved2: 0,
             reserved3: 0,
         }
+    }
+
+    pub fn new_with_format(
+        payload_len: usize,
+        sequence: u32,
+        width: u16,
+        height: u16,
+        canvas_width: u16,
+        canvas_height: u16,
+        plane0_addr: u32,
+        plane1_addr: u32,
+        plane2_addr: u32,
+        image_format: u32,
+    ) -> Self {
+        Self::new_with_data_len(
+            payload_len.saturating_sub(TYPE7_MODE6_TILE_HEADER_SIZE),
+            sequence,
+            width,
+            height,
+            canvas_width,
+            canvas_height,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
+            image_format,
+        )
     }
 
     pub fn jpeg(
@@ -930,7 +978,7 @@ impl RawFramePacket {
 }
 
 impl Type4Mode6SetupPacket {
-    pub fn new_with_format(
+    pub fn new_with_format_and_data_len(
         data: &[u8],
         payload_address: u32,
         sequence: u32,
@@ -940,10 +988,11 @@ impl Type4Mode6SetupPacket {
         base1_addr: u32,
         base2_addr: u32,
         image_format: u32,
+        header_data_len: usize,
         payload_len: usize,
     ) -> Self {
-        let header = Type4Mode6SetupHeader::new_with_format(
-            payload_len,
+        let header = Type4Mode6SetupHeader::new_with_data_len(
+            header_data_len,
             sequence,
             canvas_width,
             canvas_height,
@@ -961,6 +1010,33 @@ impl Type4Mode6SetupPacket {
             payload_address,
             payload,
         }
+    }
+
+    pub fn new_with_format(
+        data: &[u8],
+        payload_address: u32,
+        sequence: u32,
+        canvas_width: u16,
+        canvas_height: u16,
+        base0_addr: u32,
+        base1_addr: u32,
+        base2_addr: u32,
+        image_format: u32,
+        payload_len: usize,
+    ) -> Self {
+        Self::new_with_format_and_data_len(
+            data,
+            payload_address,
+            sequence,
+            canvas_width,
+            canvas_height,
+            base0_addr,
+            base1_addr,
+            base2_addr,
+            image_format,
+            payload_len.saturating_sub(TYPE4_MODE6_SETUP_HEADER_SIZE),
+            payload_len,
+        )
     }
 
     pub fn new(
@@ -1005,7 +1081,7 @@ impl Type4Mode6SetupPacket {
 }
 
 impl Type7JpegTilePacket {
-    pub fn new_with_format(
+    pub fn new_with_format_and_data_len(
         data: &[u8],
         payload_address: u32,
         sequence: u32,
@@ -1017,10 +1093,11 @@ impl Type7JpegTilePacket {
         plane1_addr: u32,
         plane2_addr: u32,
         image_format: u32,
+        header_data_len: usize,
         payload_len: usize,
     ) -> Self {
-        let header = Type7JpegTileHeader::new_with_format(
-            payload_len.saturating_sub(TYPE7_MODE6_TILE_HEADER_SIZE),
+        let header = Type7JpegTileHeader::new_with_data_len(
+            header_data_len,
             sequence,
             width,
             height,
@@ -1040,6 +1117,37 @@ impl Type7JpegTilePacket {
             payload_address,
             payload,
         }
+    }
+
+    pub fn new_with_format(
+        data: &[u8],
+        payload_address: u32,
+        sequence: u32,
+        width: u16,
+        height: u16,
+        canvas_width: u16,
+        canvas_height: u16,
+        plane0_addr: u32,
+        plane1_addr: u32,
+        plane2_addr: u32,
+        image_format: u32,
+        payload_len: usize,
+    ) -> Self {
+        Self::new_with_format_and_data_len(
+            data,
+            payload_address,
+            sequence,
+            width,
+            height,
+            canvas_width,
+            canvas_height,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
+            image_format,
+            payload_len.saturating_sub(TYPE7_MODE6_TILE_HEADER_SIZE),
+            payload_len,
+        )
     }
 
     pub fn new(
@@ -1508,6 +1616,35 @@ mod tests {
         assert_eq!(le32(&wrapper.payload[0..4]), 7);
         assert_eq!(le32(&wrapper.payload[12..16]), 6);
         assert_eq!(le32(&wrapper.payload[36..40]), VIDEO_COLOR_JPEG);
+    }
+
+    #[test]
+    fn type7_mode6_raw_format_header_data_len_excludes_padding() {
+        let nv12 = vec![0x80; 128 * 96 * 3 / 2];
+        let payload_len = type7_mode6_cmd_offset(nv12.len()) as usize;
+        let packet = Type7JpegTilePacket::new_with_format_and_data_len(
+            &nv12,
+            0x0320_0000,
+            0x1234,
+            128,
+            96,
+            1920,
+            1920,
+            0x0250_0400,
+            0x0273_ca00,
+            0,
+            VIDEO_COLOR_NV12,
+            nv12.len(),
+            payload_len,
+        );
+
+        assert!(payload_len > TYPE7_MODE6_TILE_HEADER_SIZE + nv12.len());
+        assert_eq!(le32(&packet.payload[4..8]), nv12.len() as u32);
+        assert_eq!(le32(&packet.payload[36..40]), VIDEO_COLOR_NV12);
+        assert_eq!(
+            &packet.payload[TYPE7_MODE6_TILE_HEADER_SIZE..][..4],
+            &[0x80; 4]
+        );
     }
 
     #[test]

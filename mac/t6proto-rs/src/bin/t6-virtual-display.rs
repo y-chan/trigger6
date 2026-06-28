@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::ffi::CStr;
@@ -137,6 +138,7 @@ struct Options {
     type7_large_tile_quality: Option<i32>,
     type7_large_tile_fps_divisor: u32,
     type7_setup_mode: Type7SetupMode,
+    type7_jpeg_component_ids: Type7JpegComponentIds,
     type7_wait_setup_ack_ms: u64,
     type7_setup_only: bool,
     dirty_mode: DirtyMode,
@@ -173,6 +175,7 @@ enum JpegEncoder {
     TurboBgra,
     T6Yuv420,
     VideoToolbox,
+    VideoToolboxFullTurboTiles,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,6 +183,7 @@ enum Transport {
     Jpeg,
     JpegType7,
     Nv12,
+    Nv12Type7,
     Rgb24,
     Yv12,
     Yuv444,
@@ -204,6 +208,12 @@ enum Type7SetupMode {
     LegacyFullJpeg,
     SyntheticType4,
     PairedType4Type7,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Type7JpegComponentIds {
+    ZeroBased,
+    Original,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -298,6 +308,7 @@ struct SenderState {
     scheduler: FrameScheduler,
     jpeg_compressor: Option<FastJpegCompressor>,
     vt_jpeg_compressor: Option<VtJpegCompressor>,
+    vt_jpeg_tile_compressors: HashMap<(usize, usize), VtJpegCompressor>,
     rgb_scratch: Vec<u8>,
     bgra_scratch: Vec<u8>,
     dirty_bgra_scratch: Vec<u8>,
@@ -895,6 +906,7 @@ enum SendPath {
     #[default]
     Unknown,
     FullJpeg,
+    RawNv12,
     Type4Setup,
     Type4SetupOnly,
     Type4SetupAndType7,
@@ -1010,8 +1022,12 @@ fn build_sender_state(
 ) -> Result<SenderState, Box<dyn Error>> {
     let layout = VramLayout::two_port_1080p_secondary(ram_size_mb);
     let jpeg_compressor = if matches!(options.transport, Transport::Jpeg | Transport::JpegType7)
-        && options.jpeg_encoder != JpegEncoder::VideoToolbox
-    {
+        && matches!(
+            options.jpeg_encoder,
+            JpegEncoder::TurboBgra
+                | JpegEncoder::T6Yuv420
+                | JpegEncoder::VideoToolboxFullTurboTiles
+        ) {
         Some(FastJpegCompressor::new(
             options.quality,
             options.subsamp.turbojpeg(),
@@ -1019,9 +1035,11 @@ fn build_sender_state(
     } else {
         None
     };
-    let vt_jpeg_compressor = if matches!(options.transport, Transport::Jpeg)
-        && options.jpeg_encoder == JpegEncoder::VideoToolbox
-    {
+    let vt_jpeg_compressor = if matches!(options.transport, Transport::Jpeg | Transport::JpegType7)
+        && matches!(
+            options.jpeg_encoder,
+            JpegEncoder::VideoToolbox | JpegEncoder::VideoToolboxFullTurboTiles
+        ) {
         let (output_width, output_height) =
             options.rotate.output_size(options.width, options.height);
         Some(VtJpegCompressor::new(
@@ -1071,6 +1089,7 @@ fn build_sender_state(
         scheduler,
         jpeg_compressor,
         vt_jpeg_compressor,
+        vt_jpeg_tile_compressors: HashMap::new(),
         rgb_scratch: Vec::new(),
         bgra_scratch: Vec::new(),
         dirty_bgra_scratch: Vec::new(),
@@ -1659,53 +1678,24 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
                 &mut profile,
             )?
         }
-        Transport::Nv12 => {
-            let nv12 = if frame.pixel_format == PIXEL_FORMAT_420F
-                || frame.pixel_format == PIXEL_FORMAT_420V
-            {
-                copy_captured_nv12(frame, options.rotate)?
-            } else {
-                bgra_to_nv12(
-                    frame.plane0,
-                    expected_width,
-                    expected_height,
-                    frame.plane0_stride,
-                    options.rotate,
-                    options.chroma_mode,
-                    options.yuv_matrix,
-                    options.yuv_range,
-                )?
-            };
-            let addresses = state.scheduler.next_jpeg_frame(nv12.len());
-            let fence_id = next_fence_id(state);
-            let packet = RawFramePacket::nv12_with_fence(
-                options.display_index,
-                &nv12,
-                output_width,
-                output_height,
-                addresses.fb_addr,
-                0,
-                fence_id,
-            );
-            let chunks = packet.bulk_chunks(options.max_packet_size).len();
-            if let Some(device) = &state.device {
-                send_raw_packet(
-                    device,
-                    &packet,
-                    options.max_packet_size,
-                    options.raw_bulk_mode,
-                    "nv12",
-                )?;
-            }
-            (
-                packet.payload.len(),
-                chunks,
-                addresses.cmd_addr,
-                addresses.fb_addr,
-                false,
-                fence_id,
-            )
-        }
+        Transport::Nv12Type7 => send_raw_nv12_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            &mut profile,
+        )?,
+        Transport::Nv12 => send_raw_nv12_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            &mut profile,
+        )?,
         Transport::Rgb24 => {
             ensure_bgra_capture(frame)?;
             copy_bgra_to_rgb_bytes(
@@ -1918,6 +1908,79 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
     Ok(())
 }
 
+fn send_raw_nv12_frame(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    expected_width: usize,
+    expected_height: usize,
+    output_width: u16,
+    output_height: u16,
+    profile: &mut ProfileSample,
+) -> Result<(usize, usize, u32, u32, bool, u32), Box<dyn Error>> {
+    let convert_started = Instant::now();
+    let nv12 = frame_to_nv12_full(state, frame, expected_width, expected_height)?;
+    profile.convert += convert_started.elapsed();
+    let addresses = state.scheduler.next_jpeg_frame(nv12.len());
+    let fence_id = next_fence_id(state);
+    let packet_started = Instant::now();
+    let packet = RawFramePacket::nv12_with_fence(
+        state.options.display_index,
+        &nv12,
+        output_width,
+        output_height,
+        addresses.fb_addr,
+        0,
+        fence_id,
+    );
+    let chunks = packet.bulk_chunks(state.options.max_packet_size).len();
+    profile.packet += packet_started.elapsed();
+    profile.send_path = SendPath::RawNv12;
+    if let Some(device) = &state.device {
+        let usb_timing = send_raw_packet(
+            device,
+            &packet,
+            state.options.max_packet_size,
+            state.options.raw_bulk_mode,
+            "nv12",
+        )?;
+        profile.usb_header = usb_timing.header;
+        profile.usb_data = usb_timing.data;
+        profile.usb = usb_timing.total();
+    }
+    Ok((
+        packet.payload.len(),
+        chunks,
+        addresses.cmd_addr,
+        addresses.fb_addr,
+        false,
+        fence_id,
+    ))
+}
+
+fn frame_to_nv12_full(
+    state: &mut SenderState,
+    frame: CapturedFrame,
+    expected_width: usize,
+    expected_height: usize,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let options = state.options.clone();
+    if frame.pixel_format == PIXEL_FORMAT_420F || frame.pixel_format == PIXEL_FORMAT_420V {
+        return copy_captured_nv12(frame, options.rotate);
+    }
+
+    ensure_bgra_capture(frame)?;
+    bgra_to_nv12(
+        frame.plane0,
+        expected_width,
+        expected_height,
+        frame.plane0_stride,
+        options.rotate,
+        options.chroma_mode,
+        options.yuv_matrix,
+        options.yuv_range,
+    )
+}
+
 fn send_full_jpeg_frame(
     state: &mut SenderState,
     frame: CapturedFrame,
@@ -1983,7 +2046,7 @@ fn send_full_jpeg_frame(
                 &mut state.v_plane_scratch,
             )?
         }
-        JpegEncoder::VideoToolbox => {
+        JpegEncoder::VideoToolbox | JpegEncoder::VideoToolboxFullTurboTiles => {
             let compressor = state
                 .vt_jpeg_compressor
                 .as_mut()
@@ -2005,7 +2068,7 @@ fn send_full_jpeg_frame(
             Type7SetupMode::SyntheticType4 | Type7SetupMode::PairedType4Type7
         );
     let jpeg = if use_type4_setup {
-        type7_setup_jpeg = type7_mode6_jpeg_compat(jpeg)?;
+        type7_setup_jpeg = type7_mode6_jpeg_compat(jpeg, options.type7_jpeg_component_ids)?;
         type7_setup_jpeg.as_slice()
     } else {
         jpeg
@@ -2059,22 +2122,15 @@ fn send_full_jpeg_frame(
                 tile_height,
                 &mut state.dirty_bgra_scratch,
             );
-            let mut tile_jpeg = {
-                let compressor = state
-                    .jpeg_compressor
-                    .as_mut()
-                    .ok_or("JPEG compressor is not initialized")?;
-                compressor
-                    .compress_bgra_ptr(
-                        state.dirty_bgra_scratch.as_ptr(),
-                        tile_width,
-                        tile_width * 4,
-                        tile_height,
-                        state.current_quality,
-                    )?
-                    .to_vec()
-            };
-            patch_jpeg_type7_mode6_compat(&mut tile_jpeg)?;
+            let mut tile_jpeg = encode_bgra_jpeg_vec(
+                state,
+                state.dirty_bgra_scratch.as_ptr(),
+                tile_width,
+                tile_width * 4,
+                tile_height,
+                state.current_quality,
+            )?;
+            patch_jpeg_type7_mode6_compat(&mut tile_jpeg, options.type7_jpeg_component_ids)?;
             let type7_addresses = state.scheduler.next_video_payload_exact(
                 type7_mode6_cmd_offset(tile_jpeg.len()) as usize,
                 allocated_base,
@@ -2345,22 +2401,15 @@ fn send_jpeg_type7_frame(
     let fence_id = next_fence_id(state);
     let tile_quality = type7_tile_quality(&options, state.current_quality, tile_ratio);
     let encode_started = Instant::now();
-    let mut jpeg = {
-        let compressor = state
-            .jpeg_compressor
-            .as_mut()
-            .ok_or("JPEG compressor is not initialized")?;
-        compressor
-            .compress_bgra_ptr(
-                state.dirty_bgra_scratch.as_ptr(),
-                tile_width,
-                tile_width * 4,
-                tile_height,
-                tile_quality,
-            )?
-            .to_vec()
-    };
-    patch_jpeg_type7_mode6_compat(&mut jpeg)?;
+    let mut jpeg = encode_bgra_jpeg_vec(
+        state,
+        state.dirty_bgra_scratch.as_ptr(),
+        tile_width,
+        tile_width * 4,
+        tile_height,
+        tile_quality,
+    )?;
+    patch_jpeg_type7_mode6_compat(&mut jpeg, options.type7_jpeg_component_ids)?;
     let jpeg_len = jpeg.len();
     profile.encode = encode_started.elapsed();
     if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
@@ -2397,9 +2446,15 @@ fn send_jpeg_type7_frame(
         profile.convert += full_convert_started.elapsed();
 
         let full_encode_started = Instant::now();
-        let mut full_jpeg =
-            encode_bgra_jpeg(state, full_pixels, out_w, full_pitch, out_h)?.to_vec();
-        patch_jpeg_type7_mode6_compat(&mut full_jpeg)?;
+        let mut full_jpeg = encode_full_bgra_jpeg_vec(
+            state,
+            full_pixels,
+            out_w,
+            full_pitch,
+            out_h,
+            state.current_quality,
+        )?;
+        patch_jpeg_type7_mode6_compat(&mut full_jpeg, options.type7_jpeg_component_ids)?;
         profile.encode += full_encode_started.elapsed();
 
         let canvas_width = align_usize(out_w, 16);
@@ -2599,28 +2654,113 @@ fn send_jpeg_type7_frame(
     ))
 }
 
-fn encode_bgra_jpeg<'a>(
-    state: &'a mut SenderState,
+fn encode_bgra_jpeg_vec(
+    state: &mut SenderState,
     bgra: *const u8,
     width: usize,
     pitch: usize,
     height: usize,
-) -> Result<&'a [u8], Box<dyn Error>> {
-    let compressor = state
-        .jpeg_compressor
-        .as_mut()
-        .ok_or("JPEG compressor is not initialized")?;
-    compressor.compress_bgra_ptr(bgra, width, pitch, height, state.current_quality)
+    quality: i32,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    match state.options.jpeg_encoder {
+        JpegEncoder::TurboBgra | JpegEncoder::VideoToolboxFullTurboTiles => {
+            let compressor = state
+                .jpeg_compressor
+                .as_mut()
+                .ok_or("JPEG compressor is not initialized")?;
+            Ok(compressor
+                .compress_bgra_ptr(bgra, width, pitch, height, quality)?
+                .to_vec())
+        }
+        JpegEncoder::T6Yuv420 => {
+            let compressor = state
+                .jpeg_compressor
+                .as_mut()
+                .ok_or("JPEG compressor is not initialized")?;
+            Ok(compressor
+                .compress_t6_yuv420_bgra_ptr(
+                    bgra,
+                    width,
+                    pitch,
+                    height,
+                    quality,
+                    &mut state.y_plane_scratch,
+                    &mut state.u_plane_scratch,
+                    &mut state.v_plane_scratch,
+                )?
+                .to_vec())
+        }
+        JpegEncoder::VideoToolbox => {
+            let compressor = vt_jpeg_compressor_for_size(state, width, height, quality)?;
+            Ok(compressor
+                .compress_bgra_ptr(bgra, width, pitch, height, quality)?
+                .to_vec())
+        }
+    }
 }
 
-fn type7_mode6_jpeg_compat(jpeg: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+fn encode_full_bgra_jpeg_vec(
+    state: &mut SenderState,
+    bgra: *const u8,
+    width: usize,
+    pitch: usize,
+    height: usize,
+    quality: i32,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    match state.options.jpeg_encoder {
+        JpegEncoder::VideoToolboxFullTurboTiles => {
+            let compressor = state
+                .vt_jpeg_compressor
+                .as_mut()
+                .ok_or("VideoToolbox JPEG compressor is not initialized")?;
+            Ok(compressor
+                .compress_bgra_ptr(bgra, width, pitch, height, quality)?
+                .to_vec())
+        }
+        _ => encode_bgra_jpeg_vec(state, bgra, width, pitch, height, quality),
+    }
+}
+
+fn vt_jpeg_compressor_for_size(
+    state: &mut SenderState,
+    width: usize,
+    height: usize,
+    quality: i32,
+) -> Result<&mut VtJpegCompressor, Box<dyn Error>> {
+    if let Some(compressor) = state.vt_jpeg_compressor.as_mut() {
+        if compressor.width == width && compressor.height == height {
+            return Ok(compressor);
+        }
+    }
+
+    let key = (width, height);
+    if !state.vt_jpeg_tile_compressors.contains_key(&key) {
+        state
+            .vt_jpeg_tile_compressors
+            .insert(key, VtJpegCompressor::new(width, height, quality)?);
+    }
+    state
+        .vt_jpeg_tile_compressors
+        .get_mut(&key)
+        .ok_or_else(|| "VideoToolbox JPEG tile compressor is not initialized".into())
+}
+
+fn type7_mode6_jpeg_compat(
+    jpeg: &[u8],
+    component_ids: Type7JpegComponentIds,
+) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut patched = jpeg.to_vec();
-    patch_jpeg_type7_mode6_compat(&mut patched)?;
+    patch_jpeg_type7_mode6_compat(&mut patched, component_ids)?;
     Ok(patched)
 }
 
-fn patch_jpeg_type7_mode6_compat(jpeg: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
-    patch_jpeg_component_ids_zero_based(jpeg)?;
+fn patch_jpeg_type7_mode6_compat(
+    jpeg: &mut Vec<u8>,
+    component_ids: Type7JpegComponentIds,
+) -> Result<(), Box<dyn Error>> {
+    if component_ids == Type7JpegComponentIds::ZeroBased {
+        patch_jpeg_component_ids_zero_based(jpeg)?;
+    }
     patch_jfif_version_102(jpeg)?;
     insert_intel_ipp_comment(jpeg)?;
     Ok(())
@@ -2896,11 +3036,8 @@ fn encode_dirty_tile_probe(
     );
     profile.dirty_probe_convert += convert_started.elapsed();
     let encode_started = Instant::now();
-    let compressor = state
-        .jpeg_compressor
-        .as_mut()
-        .ok_or("JPEG compressor is not initialized")?;
-    let jpeg = compressor.compress_bgra_ptr(
+    let jpeg = encode_bgra_jpeg_vec(
+        state,
         state.dirty_bgra_scratch.as_ptr(),
         width,
         width * 4,
@@ -3201,6 +3338,7 @@ fn format_send_path(path: SendPath) -> &'static str {
     match path {
         SendPath::Unknown => "unknown",
         SendPath::FullJpeg => "full-jpeg",
+        SendPath::RawNv12 => "raw-nv12",
         SendPath::Type4Setup => "type4-setup",
         SendPath::Type4SetupOnly => "type4-setup-only",
         SendPath::Type4SetupAndType7 => "type4+type7",
@@ -4116,21 +4254,21 @@ fn source_coordinate(
 
 fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut display_index = 1;
-    let mut width = 1920;
-    let mut height = 1080;
-    let mut rotate = Rotation::Deg0;
+    let mut width = 1080;
+    let mut height = 1920;
+    let mut rotate = Rotation::Deg90;
     let mut fps = 60;
     let mut frames = None;
     let mut quality = 95;
     let mut adaptive_quality = false;
     let mut min_quality = 85;
     let mut subsamp = JpegSubsampling::Yuv420;
-    let mut jpeg_encoder = JpegEncoder::TurboBgra;
+    let mut jpeg_encoder = JpegEncoder::VideoToolboxFullTurboTiles;
     let mut jpeg_target = JpegTarget::Nv12;
     let mut chroma_mode = ChromaMode::Average;
     let mut yuv_matrix = YuvMatrix::Bt601;
     let mut yuv_range = YuvRange::Full;
-    let mut transport = Transport::Jpeg;
+    let mut transport = Transport::JpegType7;
     let mut capture_format = CaptureFormat::Bgra;
     let mut raw_bulk_mode = RawBulkMode::Fragmented;
     let mut ready = false;
@@ -4139,19 +4277,20 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut profile = false;
     let mut report_every = 60;
     let mut async_send = false;
-    let mut frame_throttle = true;
-    let mut drop_late_frames = false;
-    let mut unsafe_generated_type7 = false;
-    let mut type7_rect_mode = Type7RectMode::HorizontalBand;
+    let mut frame_throttle = false;
+    let mut drop_late_frames = true;
+    let mut unsafe_generated_type7 = true;
+    let mut type7_rect_mode = Type7RectMode::Local;
     let mut type7_ring_mode = Type7RingMode::Windows;
-    let mut type7_refresh_frames = 30;
+    let mut type7_refresh_frames = 0;
     let mut type7_min_band_ratio = 0.20;
-    let mut type7_min_local_area_ratio = 0.005;
-    let mut type7_max_tile_ratio = 0.70;
+    let mut type7_min_local_area_ratio = 0.0;
+    let mut type7_max_tile_ratio = 1.0;
     let mut type7_large_tile_ratio = 0.25;
-    let mut type7_large_tile_quality = None;
-    let mut type7_large_tile_fps_divisor = 1;
-    let mut type7_setup_mode = Type7SetupMode::LegacyFullJpeg;
+    let mut type7_large_tile_quality = Some(88);
+    let mut type7_large_tile_fps_divisor = 2;
+    let mut type7_setup_mode = Type7SetupMode::PairedType4Type7;
+    let mut type7_jpeg_component_ids = Type7JpegComponentIds::Original;
     let mut type7_wait_setup_ack_ms = 0;
     let mut type7_setup_only = false;
     let mut dirty_mode = DirtyMode::Log;
@@ -4164,8 +4303,8 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut dump_first_frame = None;
     let mut dump_first_frame_delay_ms = 0;
     let mut dump_type7_packets = None;
-    let mut type7_cmd_addr = None;
-    let mut type7_cmd_wrap_addr = None;
+    let mut type7_cmd_addr = Some(0x0320_0000);
+    let mut type7_cmd_wrap_addr = Some(0x0390_0000);
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -4208,9 +4347,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--profile" => profile = true,
             "--report-every" => report_every = next_value(&mut args, "--report-every")?.parse()?,
             "--async-send" => async_send = true,
+            "--frame-throttle" => frame_throttle = true,
             "--no-frame-throttle" => frame_throttle = false,
             "--drop-late-frames" => drop_late_frames = true,
+            "--no-drop-late-frames" => drop_late_frames = false,
             "--unsafe-generated-type7" => unsafe_generated_type7 = true,
+            "--no-unsafe-generated-type7" => unsafe_generated_type7 = false,
             "--type7-rect" => {
                 type7_rect_mode = parse_type7_rect_mode(&next_value(&mut args, "--type7-rect")?)?
             }
@@ -4244,6 +4386,12 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             }
             "--type7-setup" => {
                 type7_setup_mode = parse_type7_setup_mode(&next_value(&mut args, "--type7-setup")?)?
+            }
+            "--type7-jpeg-component-ids" => {
+                type7_jpeg_component_ids = parse_type7_jpeg_component_ids(&next_value(
+                    &mut args,
+                    "--type7-jpeg-component-ids",
+                )?)?
             }
             "--type7-wait-setup-ack-ms" => {
                 type7_wait_setup_ack_ms =
@@ -4305,8 +4453,14 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     if jpeg_encoder == JpegEncoder::T6Yuv420 && subsamp != JpegSubsampling::Yuv420 {
         return Err("--jpeg-encoder t6-yuv420 requires --subsamp 420".into());
     }
-    if jpeg_encoder == JpegEncoder::VideoToolbox && transport != Transport::Jpeg {
-        return Err("--jpeg-encoder videotoolbox currently requires --transport jpeg".into());
+    if matches!(
+        jpeg_encoder,
+        JpegEncoder::VideoToolbox | JpegEncoder::VideoToolboxFullTurboTiles
+    ) && !matches!(transport, Transport::Jpeg | Transport::JpegType7)
+    {
+        return Err(
+            "--jpeg-encoder videotoolbox variants require --transport jpeg or jpeg-type7".into(),
+        );
     }
     if !(0.0..=1.0).contains(&type7_min_band_ratio) {
         return Err("--type7-min-band-ratio must be 0.0..1.0".into());
@@ -4373,6 +4527,7 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         type7_large_tile_quality,
         type7_large_tile_fps_divisor,
         type7_setup_mode,
+        type7_jpeg_component_ids,
         type7_wait_setup_ack_ms,
         type7_setup_only,
         dirty_mode,
@@ -4420,6 +4575,14 @@ fn parse_type7_setup_mode(value: &str) -> Result<Type7SetupMode, Box<dyn Error>>
     }
 }
 
+fn parse_type7_jpeg_component_ids(value: &str) -> Result<Type7JpegComponentIds, Box<dyn Error>> {
+    match value {
+        "zero-based" | "zero" | "0" => Ok(Type7JpegComponentIds::ZeroBased),
+        "original" | "encoder" | "asis" | "as-is" => Ok(Type7JpegComponentIds::Original),
+        _ => Err("--type7-jpeg-component-ids must be one of zero-based, original".into()),
+    }
+}
+
 fn parse_dirty_mode(value: &str) -> Result<DirtyMode, Box<dyn Error>> {
     match value {
         "off" => Ok(DirtyMode::Off),
@@ -4444,7 +4607,13 @@ fn parse_jpeg_encoder(value: &str) -> Result<JpegEncoder, Box<dyn Error>> {
         "turbo-bgra" | "turbo" => Ok(JpegEncoder::TurboBgra),
         "t6-yuv420" => Ok(JpegEncoder::T6Yuv420),
         "videotoolbox" | "vt" => Ok(JpegEncoder::VideoToolbox),
-        _ => Err("--jpeg-encoder must be one of turbo-bgra, t6-yuv420, videotoolbox".into()),
+        "vt-full-turbo-tiles" | "videotoolbox-full-turbo-tiles" | "hybrid-vt" => {
+            Ok(JpegEncoder::VideoToolboxFullTurboTiles)
+        }
+        _ => Err(
+            "--jpeg-encoder must be one of turbo-bgra, t6-yuv420, videotoolbox, vt-full-turbo-tiles"
+                .into(),
+        ),
     }
 }
 
@@ -4495,10 +4664,14 @@ fn parse_transport(value: &str) -> Result<Transport, Box<dyn Error>> {
         "jpeg" => Ok(Transport::Jpeg),
         "jpeg-type7" | "type7" => Ok(Transport::JpegType7),
         "nv12" => Ok(Transport::Nv12),
+        "nv12-type7" | "type7-nv12" => Ok(Transport::Nv12Type7),
         "rgb24" => Ok(Transport::Rgb24),
         "yv12" => Ok(Transport::Yv12),
         "yuv444" => Ok(Transport::Yuv444),
-        _ => Err("--transport must be one of jpeg, jpeg-type7, nv12, rgb24, yv12, yuv444".into()),
+        _ => Err(
+            "--transport must be one of jpeg, jpeg-type7, nv12, nv12-type7, rgb24, yv12, yuv444"
+                .into(),
+        ),
     }
 }
 
@@ -4543,9 +4716,9 @@ fn print_help() {
 \n\
 Options:\n\
     --display 0|1           T6 display index, default 1\n\
-    --width N               Virtual display width, default 1920\n\
-    --height N              Virtual display height, default 1080\n\
-    --rotate 0|90|180|270   Rotate output before sending, default 0\n\
+    --width N               Virtual display width, default 1080\n\
+    --height N              Virtual display height, default 1920\n\
+    --rotate 0|90|180|270   Rotate output before sending, default 90\n\
                             For portrait-on-landscape output, use --width 1080 --height 1920 --rotate 90\n\
     --fps N                 Virtual display refresh/send cap, default 60\n\
     --frames N              Stop after N sent frames\n\
@@ -4553,8 +4726,8 @@ Options:\n\
     --adaptive-quality      Dynamically lower JPEG quality when frame time exceeds the fps budget\n\
     --min-quality N         Minimum adaptive JPEG quality, default 85\n\
     --subsamp 420|422|444   JPEG chroma subsampling, default 420\n\
-    --jpeg-encoder turbo-bgra|t6-yuv420|videotoolbox\n\
-                            JPEG encoder input path, default turbo-bgra\n\
+    --jpeg-encoder turbo-bgra|t6-yuv420|videotoolbox|vt-full-turbo-tiles\n\
+                            JPEG encoder input path, default vt-full-turbo-tiles\n\
     --jpeg-target nv12|yv12|yuv444\n\
                             Target format for JPEG decoder output, default nv12\n\
     --chroma-mode average|saturated|top-left\n\
@@ -4566,43 +4739,49 @@ Options:\n\
                             CGDisplayStream capture pixel format, default bgra\n\
     --raw-bulk fragmented|single\n\
                             Raw nv12/yv12/rgb24 USB transfer mode, default fragmented\n\
-    --transport jpeg|jpeg-type7|nv12|rgb24|yv12|yuv444\n\
-                            Frame transport, default jpeg\n\
+    --transport jpeg|jpeg-type7|nv12|nv12-type7|rgb24|yv12|yuv444\n\
+                            Frame transport, default jpeg-type7\n\
     --ready                 Send software-ready before capture\n\
     --power-on              Send monitor power-on before capture\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before capture\n\
     --profile               Print average convert/encode/packet/USB timings every 60 sent frames\n\
     --report-every N        Print frame status every N sent frames, default 60; 0 disables periodic status\n\
     --async-send            Copy latest captured frame in the callback and send from a worker thread\n\
+    --frame-throttle        Drop callbacks before the next frame deadline, default disabled\n\
     --no-frame-throttle     Send every callback frame instead of dropping callbacks before the next frame deadline\n\
-    --drop-late-frames      Drop JPEG frames after encode if they already missed the frame budget\n\
+    --drop-late-frames      Drop JPEG frames after encode if they already missed the frame budget, default enabled\n\
+    --no-drop-late-frames   Send late JPEG frames instead of dropping them\n\
     --unsafe-generated-type7\n\
-                            Enable generated type7 dirty JPEG updates. Experimental; can corrupt display state\n\
+                            Enable generated type7 dirty JPEG updates, default enabled. Experimental; can corrupt display state\n\
+    --no-unsafe-generated-type7\n\
+                            Disable generated type7 dirty JPEG updates\n\
     --type7-rect auto|local|horizontal-band|vertical-band\n\
-                            Type7 dirty rectangle shaping, default horizontal-band\n\
+                            Type7 dirty rectangle shaping, default local\n\
     --type7-ring windows|legacy\n\
                             Type7 payload ring allocator, default windows\n\
     --type7-refresh-frames N\n\
-                            Send a full JPEG refresh every N Type7-capable frames, default 30; 0 disables periodic refresh\n\
+                            Send a full JPEG refresh every N Type7-capable frames, default 0; 0 disables periodic refresh\n\
     --type7-min-band-ratio N\n\
                             Fall back to full JPEG when a Type7 band is smaller than this screen ratio, default 0.20\n\
     --type7-min-local-area-ratio N\n\
-                            Fall back to full JPEG when a Type7 local tile is smaller than this screen area ratio, default 0.005\n\
+                            Fall back to full JPEG when a Type7 local tile is smaller than this screen area ratio, default 0\n\
     --type7-max-tile-ratio N\n\
-                            Fall back to full JPEG when a Type7 tile is larger than this screen area ratio, default 0.70\n\
+                            Fall back to full JPEG when a Type7 tile is larger than this screen area ratio, default 1.0\n\
     --type7-large-tile-ratio N\n\
                             Tile area ratio threshold for --type7-large-tile-quality, default 0.25\n\
     --type7-large-tile-quality N\n\
-                            Override JPEG quality for large Type7 tiles only; disabled by default\n\
+                            Override JPEG quality for large Type7 tiles only, default 88\n\
     --type7-large-tile-fps-divisor N\n\
-                            Send large Type7 tiles every N frame intervals, default 1; use 2 for 30fps at --fps 60\n\
+                            Send large Type7 tiles every N frame intervals, default 2\n\
     --type7-setup legacy-full-jpeg|synthetic-type4|paired-type4-type7\n\
-                            Full refresh/setup strategy for jpeg-type7, default legacy-full-jpeg\n\
+                            Full refresh/setup strategy for jpeg-type7, default paired-type4-type7\n\
+    --type7-jpeg-component-ids zero-based|original\n\
+                            Component IDs in Type7 JPEG SOF/SOS segments, default original\n\
     --type7-wait-setup-ack-ms N\n\
                             In paired Type4+Type7 mode, wait up to N ms for setup ack before Type7, default 0\n\
     --type7-setup-only      In paired Type4+Type7 mode, send only the Type4 setup packet and skip Type7\n\
-    --type7-cmd-addr N      Override Type7 command ring start address, e.g. 0x03500000\n\
-    --type7-cmd-wrap-addr N Override Type7 command ring wrap address, default VRAM size\n\
+    --type7-cmd-addr N      Override Type7 command ring start address, default 0x03200000\n\
+    --type7-cmd-wrap-addr N Override Type7 command ring wrap address, default 0x03900000\n\
     --dirty-mode off|log|bbox|tile-send\n\
                             Dirty rect profiling mode, default log. bbox/tile-send crop-encode dirty rect tiles for measurement only\n\
     --dry-run               Capture/encode/packetize but do not open USB or send\n\
@@ -4622,9 +4801,10 @@ Options:\n\
 #[cfg(test)]
 mod tests {
     use super::{
-        ChromaMode, Rotation, YuvMatrix, YuvRange, bgra_to_nv12, bgra_to_yv12,
-        patch_jpeg_component_ids_zero_based, rgb_to_nv12, rgb_to_yv12, rotate_bgra_with_vimage,
-        source_coordinate, type7_mode6_plane_addrs,
+        ChromaMode, Rotation, Type7JpegComponentIds, YuvMatrix, YuvRange, bgra_to_nv12,
+        bgra_to_yv12, patch_jpeg_component_ids_zero_based, patch_jpeg_type7_mode6_compat,
+        rgb_to_nv12, rgb_to_yv12, rotate_bgra_with_vimage, source_coordinate,
+        type7_mode6_plane_addrs,
     };
 
     #[test]
@@ -4746,6 +4926,30 @@ mod tests {
 
         assert_eq!(&jpeg[12..21], &[0, 0x22, 0, 1, 0x11, 1, 2, 0x11, 1]);
         assert_eq!(&jpeg[26..32], &[0, 0, 1, 0x11, 2, 0x11]);
+    }
+
+    #[test]
+    fn type7_jpeg_original_component_ids_preserves_sof_and_sos_ids() {
+        let mut jpeg = sample_jpeg_with_one_based_component_ids();
+
+        patch_jpeg_type7_mode6_compat(&mut jpeg, Type7JpegComponentIds::Original).unwrap();
+
+        assert!(
+            jpeg.windows(9)
+                .any(|window| window == [1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1])
+        );
+        assert!(
+            jpeg.windows(6)
+                .any(|window| window == [1, 0, 2, 0x11, 3, 0x11])
+        );
+    }
+
+    fn sample_jpeg_with_one_based_component_ids() -> Vec<u8> {
+        vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10, 0x03, 0x01, 0x22,
+            0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00,
+            0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0xff, 0xd9,
+        ]
     }
 
     fn sample_rgb_4x2() -> Vec<u8> {
