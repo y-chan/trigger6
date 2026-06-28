@@ -2,6 +2,7 @@ use std::env;
 use std::error::Error;
 use std::ffi::CStr;
 use std::ffi::c_void;
+use std::fs;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -13,8 +14,8 @@ use image::RgbImage;
 use t6proto::usb::T6Device;
 use t6proto::{
     BulkDmaHeader, BulkTransferChunk, DEFAULT_MAX_BULK_PACKET_SIZE, FrameScheduler,
-    JpegFramePacket, RawFramePacket, Type7JpegTilePacket, VIDEO_COLOR_NV12, VIDEO_COLOR_YUV444,
-    VIDEO_COLOR_YV12, VIDEO_FLAG_RESET_JPEG, VramLayout,
+    JpegFramePacket, RawFramePacket, Type4Mode6SetupPacket, Type7JpegTilePacket, VIDEO_COLOR_NV12,
+    VIDEO_COLOR_YUV444, VIDEO_COLOR_YV12, VIDEO_FLAG_RESET_JPEG, VramLayout, type7_jpeg_cmd_offset,
 };
 use turbojpeg::Subsamp;
 use turbojpeg_sys as tj;
@@ -41,6 +42,9 @@ type FrameCallback = extern "C" fn(
     usize,
     *mut c_void,
 );
+
+const TYPE7_MODE6_ALLOCATED_BASES: [u32; 3] = [0x0250_0400, 0x0295_56c0, 0x02da_a980];
+const TYPE7_SETUP_SLOT_ORDER: [usize; 3] = [2, 0, 1];
 
 const PIXEL_FORMAT_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 const PIXEL_FORMAT_420F: u32 = u32::from_be_bytes(*b"420f");
@@ -117,9 +121,23 @@ struct Options {
     power_on: bool,
     reset_jpeg_engine: bool,
     profile: bool,
+    report_every: u32,
     async_send: bool,
+    frame_throttle: bool,
     drop_late_frames: bool,
     unsafe_generated_type7: bool,
+    type7_rect_mode: Type7RectMode,
+    type7_ring_mode: Type7RingMode,
+    type7_refresh_frames: u32,
+    type7_min_band_ratio: f64,
+    type7_min_local_area_ratio: f64,
+    type7_max_tile_ratio: f64,
+    type7_large_tile_ratio: f64,
+    type7_large_tile_quality: Option<i32>,
+    type7_large_tile_fps_divisor: u32,
+    type7_setup_mode: Type7SetupMode,
+    type7_wait_setup_ack_ms: u64,
+    type7_setup_only: bool,
     dirty_mode: DirtyMode,
     dry_run: bool,
     ram_size_mb: Option<u8>,
@@ -129,6 +147,9 @@ struct Options {
     max_packet_size: u32,
     dump_first_frame: Option<PathBuf>,
     dump_first_frame_delay_ms: u64,
+    dump_type7_packets: Option<PathBuf>,
+    type7_cmd_addr: Option<u32>,
+    type7_cmd_wrap_addr: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +182,27 @@ enum Transport {
     Rgb24,
     Yv12,
     Yuv444,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Type7RectMode {
+    Auto,
+    Local,
+    HorizontalBand,
+    VerticalBand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Type7RingMode {
+    Windows,
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Type7SetupMode {
+    LegacyFullJpeg,
+    SyntheticType4,
+    PairedType4Type7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -275,6 +317,10 @@ struct SenderState {
     busy_frames: u32,
     late_frames: u32,
     current_display_fb_addr: Option<u32>,
+    current_type7_slot: usize,
+    current_type7_allocated_base: u32,
+    last_type7_dirty_bbox: Option<(usize, usize, usize, usize)>,
+    dumped_type7_packets: u32,
     profile_stats: ProfileStats,
     first_frame_dumped: bool,
     sending: AtomicBool,
@@ -837,6 +883,34 @@ struct ProfileSample {
     dirty_probe_convert: Duration,
     dirty_probe_encode: Duration,
     dirty_probe_payload_bytes: usize,
+    send_path: SendPath,
+    type7_setup_ack: Option<InterruptWaitSummary>,
+    type7_tile: Option<Type7TileProfile>,
+    type7_full_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SendPath {
+    #[default]
+    Unknown,
+    FullJpeg,
+    Type4Setup,
+    Type4SetupOnly,
+    Type4SetupAndType7,
+    Type7Tile,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Type7TileProfile {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    area_ratio: f64,
+    jpeg_quality: i32,
+    plane0_addr: u32,
+    plane1_addr: u32,
+    plane2_addr: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -959,6 +1033,18 @@ fn build_sender_state(
     };
     let current_quality = options.quality;
     let remaining_interrupt_dumps = options.dump_interrupts;
+    let mut scheduler = FrameScheduler::new(layout);
+    if options.transport == Transport::JpegType7 {
+        if let Some(cmd_addr) = options.type7_cmd_addr {
+            scheduler.set_cmd_ring(
+                cmd_addr,
+                options
+                    .type7_cmd_wrap_addr
+                    .unwrap_or_else(|| u32::from(ram_size_mb) * 1024 * 1024),
+            );
+        }
+    }
+
     Ok(SenderState {
         frame_interval: Duration::from_secs_f64(1.0 / f64::from(options.fps.max(1))),
         next_send_at: Instant::now(),
@@ -971,13 +1057,17 @@ fn build_sender_state(
         busy_frames: 0,
         late_frames: 0,
         current_display_fb_addr: None,
+        current_type7_slot: 0,
+        current_type7_allocated_base: TYPE7_MODE6_ALLOCATED_BASES[0],
+        last_type7_dirty_bbox: None,
+        dumped_type7_packets: 0,
         profile_stats: ProfileStats::default(),
         first_frame_dumped: false,
         sending: AtomicBool::new(false),
         stopped: AtomicBool::new(false),
         options,
         device,
-        scheduler: FrameScheduler::new(layout),
+        scheduler,
         jpeg_compressor,
         vt_jpeg_compressor,
         rgb_scratch: Vec::new(),
@@ -1220,7 +1310,7 @@ extern "C" fn frame_callback(
         return;
     }
 
-    if Instant::now() < state.next_send_at {
+    if state.options.frame_throttle && Instant::now() < state.next_send_at {
         state.dropped_frames = state.dropped_frames.saturating_add(1);
         state.throttled_frames = state.throttled_frames.saturating_add(1);
         return;
@@ -1760,12 +1850,14 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
     state.sent_frames += 1;
     profile.total = frame_started.elapsed();
     adapt_jpeg_quality(state, profile.total);
-    resync_next_send_at(state, Instant::now());
+    resync_next_send_at_for_profile(state, Instant::now(), profile);
     if options.profile {
         state.profile_stats.push(profile);
     }
 
-    if state.sent_frames == 1 || state.sent_frames % 60 == 0 {
+    if state.sent_frames == 1
+        || (options.report_every > 0 && state.sent_frames % options.report_every == 0)
+    {
         let now = Instant::now();
         let sent_delta = state
             .sent_frames
@@ -1777,7 +1869,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             0.0
         };
         println!(
-            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} cmd=0x{:08x} fb=0x{:08x} fence=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}{}",
+            "frame={} fps={:.1} dropped={} throttled={} busy={} late={} quality={} payload_bytes={} path={} cmd=0x{:08x} fb=0x{:08x} fence=0x{:08x} reset={} chunks={} dirty_rects={} dirty_area={:.1}% dirty_bbox={}x{}+{}+{} ({:.1}%) tile_probe_payload={} tile_probe_ms convert={:.2} encode={:.2}{}{}{}{}",
             state.sent_frames,
             sent_fps,
             state.dropped_frames,
@@ -1786,6 +1878,7 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             state.late_frames,
             state.current_quality,
             payload_bytes,
+            format_send_path(profile.send_path),
             cmd_addr,
             fb_addr,
             fence_id,
@@ -1801,6 +1894,9 @@ fn send_frame(state: &mut SenderState, frame: CapturedFrame) -> Result<(), Box<d
             profile.dirty_probe_payload_bytes,
             duration_ms(profile.dirty_probe_convert),
             duration_ms(profile.dirty_probe_encode),
+            format_type7_tile_summary(profile.type7_tile),
+            format_type7_full_reason(profile.type7_full_reason),
+            format_setup_ack_summary(profile.type7_setup_ack),
             format_interrupt_summary(interrupt_summary)
         );
         state.last_report_at = now;
@@ -1900,6 +1996,19 @@ fn send_full_jpeg_frame(
             )?
         }
     };
+    let type7_setup_jpeg;
+    let use_type4_setup = options.transport == Transport::JpegType7
+        && options.unsafe_generated_type7
+        && matches!(
+            options.type7_setup_mode,
+            Type7SetupMode::SyntheticType4 | Type7SetupMode::PairedType4Type7
+        );
+    let jpeg = if use_type4_setup {
+        type7_setup_jpeg = type7_mode6_jpeg_compat(jpeg)?;
+        type7_setup_jpeg.as_slice()
+    } else {
+        jpeg
+    };
     let jpeg_len = jpeg.len();
     profile.encode = encode_started.elapsed();
     if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
@@ -1907,6 +2016,143 @@ fn send_full_jpeg_frame(
         return Ok((0, 0, 0, 0, false, 0));
     }
     let packet_started = Instant::now();
+    if use_type4_setup {
+        let slot = TYPE7_SETUP_SLOT_ORDER[state.current_type7_slot];
+        let allocated_base = TYPE7_MODE6_ALLOCATED_BASES[slot];
+        let canvas_width = align_usize(usize::from(output_width), 16) as u16;
+        let canvas_height = align_usize(usize::from(output_width), 16) as u16;
+        let (base0_addr, base1_addr, base2_addr) = type7_mode6_slot_bases(
+            allocated_base,
+            usize::from(output_width),
+            usize::from(output_height),
+        );
+        let addresses = state
+            .scheduler
+            .next_video_payload_exact(type7_jpeg_cmd_offset(jpeg_len) as usize, allocated_base);
+        state.current_display_fb_addr = Some(allocated_base);
+        state.current_type7_allocated_base = allocated_base;
+        state.current_type7_slot = (state.current_type7_slot + 1) % TYPE7_SETUP_SLOT_ORDER.len();
+        let packet = Type4Mode6SetupPacket::new(
+            jpeg,
+            addresses.cmd_addr,
+            fence_id,
+            canvas_width,
+            canvas_height,
+            base0_addr,
+            base1_addr,
+            base2_addr,
+        );
+        let chunks = packet.bulk_chunks(options.max_packet_size);
+        profile.send_path = SendPath::Type4Setup;
+        profile.packet = packet_started.elapsed();
+        if options.type7_setup_mode == Type7SetupMode::PairedType4Type7 {
+            let type7_fence_id = next_fence_id(state);
+            let tile_width = usize::from(output_width).min(64);
+            let tile_height = usize::from(output_height).min(64);
+            crop_bgra_bbox(
+                jpeg_pixels,
+                jpeg_pitch,
+                0,
+                0,
+                tile_width,
+                tile_height,
+                &mut state.dirty_bgra_scratch,
+            );
+            let mut tile_jpeg = {
+                let compressor = state
+                    .jpeg_compressor
+                    .as_mut()
+                    .ok_or("JPEG compressor is not initialized")?;
+                compressor
+                    .compress_bgra_ptr(
+                        state.dirty_bgra_scratch.as_ptr(),
+                        tile_width,
+                        tile_width * 4,
+                        tile_height,
+                        state.current_quality,
+                    )?
+                    .to_vec()
+            };
+            patch_jpeg_type7_mode6_compat(&mut tile_jpeg)?;
+            let type7_addresses = state.scheduler.next_video_payload_exact(
+                type7_jpeg_cmd_offset(tile_jpeg.len()) as usize,
+                allocated_base,
+            );
+            let (plane0_addr, plane1_addr, plane2_addr) = type7_mode6_plane_addrs(
+                allocated_base,
+                0,
+                0,
+                usize::from(output_width),
+                usize::from(output_height),
+                usize::from(canvas_width),
+                usize::from(canvas_height),
+            );
+            profile.type7_tile = Some(Type7TileProfile {
+                x: 0,
+                y: 0,
+                width: tile_width,
+                height: tile_height,
+                area_ratio: (tile_width * tile_height) as f64
+                    / (usize::from(output_width) * usize::from(output_height)).max(1) as f64,
+                jpeg_quality: state.current_quality,
+                plane0_addr,
+                plane1_addr,
+                plane2_addr,
+            });
+            let type7_packet = Type7JpegTilePacket::new(
+                &tile_jpeg,
+                type7_addresses.cmd_addr,
+                type7_fence_id,
+                tile_width as u16,
+                tile_height as u16,
+                canvas_width,
+                canvas_height,
+                plane0_addr,
+                plane1_addr,
+                plane2_addr,
+            );
+            let type7_chunks = type7_packet.bulk_chunks(options.max_packet_size);
+            profile.send_path = SendPath::Type4SetupAndType7;
+            if let Some(device) = &state.device {
+                let setup_usb = send_chunks_with_context(device, &chunks, "type4-setup")?;
+                if options.type7_wait_setup_ack_ms > 0 {
+                    profile.type7_setup_ack = Some(wait_for_display_interrupts(
+                        device,
+                        Duration::from_millis(options.type7_wait_setup_ack_ms),
+                        &mut state.remaining_interrupt_dumps,
+                        fence_id,
+                    )?);
+                }
+                let type7_usb = send_chunks_with_context(device, &type7_chunks, "jpeg-type7")?;
+                profile.usb_header = setup_usb.header + type7_usb.header;
+                profile.usb_data = setup_usb.data + type7_usb.data;
+                profile.usb = profile.usb_header + profile.usb_data;
+            }
+            return Ok((
+                packet.payload.len() + type7_packet.payload.len(),
+                chunks.len() + type7_chunks.len(),
+                type7_addresses.cmd_addr,
+                allocated_base,
+                false,
+                type7_fence_id,
+            ));
+        }
+        if let Some(device) = &state.device {
+            let usb_timing = send_chunks_with_context(device, &chunks, "type4-setup")?;
+            profile.usb_header = usb_timing.header;
+            profile.usb_data = usb_timing.data;
+            profile.usb = usb_timing.total();
+        }
+        return Ok((
+            packet.payload.len(),
+            chunks.len(),
+            addresses.cmd_addr,
+            allocated_base,
+            false,
+            fence_id,
+        ));
+    }
+
     let addresses = state.scheduler.next_jpeg_frame(jpeg_len);
     state.current_display_fb_addr = Some(addresses.fb_addr);
     let flags = if addresses.reset_jpeg {
@@ -1926,6 +2172,7 @@ fn send_full_jpeg_frame(
         fence_id,
     );
     let chunks = packet.bulk_chunks(options.max_packet_size).len();
+    profile.send_path = SendPath::FullJpeg;
     profile.packet = packet_started.elapsed();
     if let Some(device) = &state.device {
         let usb_timing =
@@ -1969,11 +2216,41 @@ fn send_jpeg_type7_frame(
             profile,
         );
     }
+    if state.options.type7_setup_mode == Type7SetupMode::LegacyFullJpeg {
+        return send_full_jpeg_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            frame_started,
+            profile,
+        );
+    }
 
-    let dirty_bbox = clamped_dirty_bbox(frame.dirty, expected_width, expected_height);
-    let fullish = profile.dirty_bbox_ratio >= 0.80;
-    let refresh_frame = state.sent_frames == 0 || state.sent_frames % 30 == 0;
+    let current_dirty_bbox = clamped_dirty_bbox(frame.dirty, expected_width, expected_height);
+    let dirty_bbox = current_dirty_bbox.map(|bbox| match state.last_type7_dirty_bbox {
+        Some(previous_bbox) => union_bbox(bbox, previous_bbox, expected_width, expected_height),
+        None => bbox,
+    });
+    let fullish = profile.dirty_bbox_ratio >= 0.70;
+    let refresh_frame = state.sent_frames == 0
+        || (state.options.type7_refresh_frames > 0
+            && state
+                .sent_frames
+                .is_multiple_of(state.options.type7_refresh_frames));
     if state.current_display_fb_addr.is_none() || dirty_bbox.is_none() || fullish || refresh_frame {
+        profile.type7_full_reason = if state.current_display_fb_addr.is_none() {
+            Some("no-current-fb")
+        } else if dirty_bbox.is_none() {
+            Some("no-dirty-bbox")
+        } else if fullish {
+            Some("fullish")
+        } else {
+            Some("refresh")
+        };
+        state.last_type7_dirty_bbox = None;
         return send_full_jpeg_frame(
             state,
             frame,
@@ -1987,7 +2264,8 @@ fn send_jpeg_type7_frame(
     }
 
     let (dirty_x, dirty_y, dirty_width, dirty_height) = dirty_bbox.expect("checked above");
-    let (_out_x, out_y, _out_width, out_height) = rotate_bbox(
+    state.last_type7_dirty_bbox = current_dirty_bbox;
+    let (out_x, out_y, out_width, out_height) = rotate_bbox(
         dirty_x,
         dirty_y,
         dirty_width,
@@ -1998,14 +2276,38 @@ fn send_jpeg_type7_frame(
     );
     let out_w = usize::from(output_width);
     let out_h = usize::from(output_height);
-    let band_y = (out_y / 8) * 8;
-    let band_end = align_usize((out_y + out_height).min(out_h), 8).min(out_h);
-    let band_height = band_end.saturating_sub(band_y);
-    if band_height == 0 || out_w == 0 {
+    let Some((tile_x, tile_y, tile_width, tile_height)) = type7_update_rect(
+        out_x,
+        out_y,
+        out_width,
+        out_height,
+        out_w,
+        out_h,
+        state.options.type7_rect_mode,
+    ) else {
         return Ok((0, 0, 0, 0, false, 0));
-    }
-    let band_ratio = band_height as f64 / out_h.max(1) as f64;
-    if band_ratio < 0.20 || band_ratio > 0.90 {
+    };
+    let tile_ratio = (tile_width * tile_height) as f64 / (out_w * out_h).max(1) as f64;
+    let too_small_horizontal_band =
+        matches!(state.options.type7_rect_mode, Type7RectMode::HorizontalBand)
+            && (tile_height as f64 / out_h.max(1) as f64) < state.options.type7_min_band_ratio;
+    let too_small_vertical_band =
+        matches!(state.options.type7_rect_mode, Type7RectMode::VerticalBand)
+            && (tile_width as f64 / out_w.max(1) as f64) < state.options.type7_min_band_ratio;
+    let too_small_local = matches!(state.options.type7_rect_mode, Type7RectMode::Local)
+        && tile_ratio < state.options.type7_min_local_area_ratio;
+    let too_small_band = too_small_horizontal_band || too_small_vertical_band;
+    if tile_ratio >= state.options.type7_max_tile_ratio || too_small_band || too_small_local {
+        profile.type7_full_reason = if tile_ratio >= state.options.type7_max_tile_ratio {
+            Some("tile-ratio")
+        } else if too_small_horizontal_band {
+            Some("min-horizontal-band")
+        } else if too_small_vertical_band {
+            Some("min-vertical-band")
+        } else {
+            Some("min-local-area")
+        };
+        state.last_type7_dirty_bbox = None;
         return send_full_jpeg_frame(
             state,
             frame,
@@ -2020,28 +2322,16 @@ fn send_jpeg_type7_frame(
 
     let options = state.options.clone();
     let convert_started = Instant::now();
-    let (jpeg_pixels, jpeg_pitch) = if options.rotate == Rotation::Deg0 {
-        (frame.plane0, frame.plane0_stride)
-    } else {
-        let (rotated_width, rotated_height, rotated_stride) = rotate_bgra_with_vimage(
-            frame.plane0,
-            expected_width,
-            expected_height,
-            frame.plane0_stride,
-            options.rotate,
-            &mut state.bgra_scratch,
-        )?;
-        debug_assert_eq!(rotated_width, out_w);
-        debug_assert_eq!(rotated_height, out_h);
-        (state.bgra_scratch.as_ptr(), rotated_stride)
-    };
-    crop_bgra_bbox(
-        jpeg_pixels,
-        jpeg_pitch,
-        0,
-        band_y,
-        out_w,
-        band_height,
+    crop_rotated_bgra_bbox(
+        frame.plane0,
+        expected_width,
+        expected_height,
+        frame.plane0_stride,
+        options.rotate,
+        tile_x,
+        tile_y,
+        tile_width,
+        tile_height,
         &mut state.dirty_bgra_scratch,
     );
     profile.convert = convert_started.elapsed();
@@ -2052,20 +2342,24 @@ fn send_jpeg_type7_frame(
     }
 
     let fence_id = next_fence_id(state);
+    let tile_quality = type7_tile_quality(&options, state.current_quality, tile_ratio);
     let encode_started = Instant::now();
-    let jpeg = {
+    let mut jpeg = {
         let compressor = state
             .jpeg_compressor
             .as_mut()
             .ok_or("JPEG compressor is not initialized")?;
-        compressor.compress_bgra_ptr(
-            state.dirty_bgra_scratch.as_ptr(),
-            out_w,
-            out_w * 4,
-            band_height,
-            state.current_quality,
-        )?
+        compressor
+            .compress_bgra_ptr(
+                state.dirty_bgra_scratch.as_ptr(),
+                tile_width,
+                tile_width * 4,
+                tile_height,
+                tile_quality,
+            )?
+            .to_vec()
     };
+    patch_jpeg_type7_mode6_compat(&mut jpeg)?;
     let jpeg_len = jpeg.len();
     profile.encode = encode_started.elapsed();
     if options.drop_late_frames && frame_started.elapsed() > frame_interval * 2 {
@@ -2074,27 +2368,218 @@ fn send_jpeg_type7_frame(
     }
 
     let packet_started = Instant::now();
+    if options.type7_setup_only {
+        let setup_fence_id = fence_id;
+        let type7_fence_id = next_fence_id(state);
+        let slot = TYPE7_SETUP_SLOT_ORDER[state.current_type7_slot];
+        let allocated_base = TYPE7_MODE6_ALLOCATED_BASES[slot];
+        state.current_type7_slot = (state.current_type7_slot + 1) % TYPE7_SETUP_SLOT_ORDER.len();
+        state.current_type7_allocated_base = allocated_base;
+        state.current_display_fb_addr = Some(allocated_base);
+
+        let full_convert_started = Instant::now();
+        let (full_pixels, full_pitch) = if options.rotate == Rotation::Deg0 {
+            (frame.plane0, frame.plane0_stride)
+        } else {
+            let (rotated_width, rotated_height, rotated_stride) = rotate_bgra_with_vimage(
+                frame.plane0,
+                expected_width,
+                expected_height,
+                frame.plane0_stride,
+                options.rotate,
+                &mut state.bgra_scratch,
+            )?;
+            debug_assert_eq!(rotated_width, out_w);
+            debug_assert_eq!(rotated_height, out_h);
+            (state.bgra_scratch.as_ptr(), rotated_stride)
+        };
+        profile.convert += full_convert_started.elapsed();
+
+        let full_encode_started = Instant::now();
+        let mut full_jpeg =
+            encode_bgra_jpeg(state, full_pixels, out_w, full_pitch, out_h)?.to_vec();
+        patch_jpeg_type7_mode6_compat(&mut full_jpeg)?;
+        profile.encode += full_encode_started.elapsed();
+
+        let canvas_width = align_usize(out_w, 16);
+        let canvas_height = align_usize(out_w, 16);
+        let (base0_addr, base1_addr, base2_addr) =
+            type7_mode6_slot_bases(allocated_base, out_w, out_h);
+        let setup_addresses = state.scheduler.next_video_payload_exact(
+            type7_jpeg_cmd_offset(full_jpeg.len()) as usize,
+            allocated_base,
+        );
+        let setup_packet = Type4Mode6SetupPacket::new(
+            &full_jpeg,
+            setup_addresses.cmd_addr,
+            setup_fence_id,
+            canvas_width as u16,
+            canvas_height as u16,
+            base0_addr,
+            base1_addr,
+            base2_addr,
+        );
+        let setup_chunks = setup_packet.bulk_chunks(options.max_packet_size);
+
+        let (plane0_addr, plane1_addr, plane2_addr) = type7_mode6_plane_addrs(
+            allocated_base,
+            tile_x,
+            tile_y,
+            out_w,
+            out_h,
+            canvas_width,
+            canvas_height,
+        );
+        profile.type7_tile = Some(Type7TileProfile {
+            x: tile_x,
+            y: tile_y,
+            width: tile_width,
+            height: tile_height,
+            area_ratio: tile_ratio,
+            jpeg_quality: state.current_quality,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
+        });
+        let type7_addresses = state
+            .scheduler
+            .next_video_payload_exact(type7_jpeg_cmd_offset(jpeg_len) as usize, allocated_base);
+        let type7_packet = Type7JpegTilePacket::new(
+            &jpeg,
+            type7_addresses.cmd_addr,
+            type7_fence_id,
+            tile_width as u16,
+            tile_height as u16,
+            canvas_width as u16,
+            canvas_height as u16,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
+        );
+        let type7_chunks = type7_packet.bulk_chunks(options.max_packet_size);
+        dump_type7_pair_packets(
+            state,
+            &setup_packet,
+            &setup_chunks,
+            setup_fence_id,
+            &type7_packet,
+            &type7_chunks,
+            type7_fence_id,
+        )?;
+        profile.send_path = if options.type7_setup_only {
+            SendPath::Type4SetupOnly
+        } else {
+            SendPath::Type4SetupAndType7
+        };
+        profile.packet = packet_started.elapsed();
+        if options.type7_setup_only {
+            if let Some(device) = &state.device {
+                let setup_usb = send_chunks_with_context(device, &setup_chunks, "type4-setup")?;
+                profile.usb_header = setup_usb.header;
+                profile.usb_data = setup_usb.data;
+                profile.usb = setup_usb.total();
+            }
+            return Ok((
+                setup_packet.payload.len(),
+                setup_chunks.len(),
+                setup_addresses.cmd_addr,
+                allocated_base,
+                false,
+                setup_fence_id,
+            ));
+        }
+        if let Some(device) = &state.device {
+            let setup_usb = send_chunks_with_context(device, &setup_chunks, "type4-setup")?;
+            if options.type7_wait_setup_ack_ms > 0 {
+                profile.type7_setup_ack = Some(wait_for_display_interrupts(
+                    device,
+                    Duration::from_millis(options.type7_wait_setup_ack_ms),
+                    &mut state.remaining_interrupt_dumps,
+                    setup_fence_id,
+                )?);
+            }
+            let type7_usb = send_chunks_with_context(device, &type7_chunks, "jpeg-type7")?;
+            profile.usb_header = setup_usb.header + type7_usb.header;
+            profile.usb_data = setup_usb.data + type7_usb.data;
+            profile.usb = profile.usb_header + profile.usb_data;
+        }
+        return Ok((
+            setup_packet.payload.len() + type7_packet.payload.len(),
+            setup_chunks.len() + type7_chunks.len(),
+            type7_addresses.cmd_addr,
+            allocated_base,
+            false,
+            type7_fence_id,
+        ));
+    }
+
     let fb_addr = state
         .current_display_fb_addr
         .ok_or("type7 has no current framebuffer address")?;
-    const TYPE7_PITCH: u32 = 2048;
-    let start_addr = fb_addr.saturating_add((band_y as u32).saturating_mul(TYPE7_PITCH));
-    let end_addr = fb_addr.saturating_add((band_end as u32).saturating_mul(TYPE7_PITCH));
-    let canvas_height = output_width.max(output_height);
-    let payload_len = 48usize.saturating_add(jpeg_len);
-    let addresses = state.scheduler.next_jpeg_payload(payload_len, fb_addr);
+    let canvas_width = align_usize(out_w, 16);
+    let canvas_height = align_usize(out_w, 16);
+    let (plane0_addr, plane1_addr, plane2_addr) = type7_mode6_plane_addrs(
+        state.current_type7_allocated_base,
+        tile_x,
+        tile_y,
+        out_w,
+        out_h,
+        canvas_width,
+        canvas_height,
+    );
+    profile.type7_tile = Some(Type7TileProfile {
+        x: tile_x,
+        y: tile_y,
+        width: tile_width,
+        height: tile_height,
+        area_ratio: tile_ratio,
+        jpeg_quality: tile_quality,
+        plane0_addr,
+        plane1_addr,
+        plane2_addr,
+    });
+    let addresses = match state.options.type7_ring_mode {
+        Type7RingMode::Windows => state.scheduler.next_type7_jpeg_payload(jpeg_len, fb_addr),
+        Type7RingMode::Legacy => state
+            .scheduler
+            .next_jpeg_payload(48usize.saturating_add(jpeg_len), fb_addr),
+    };
+    if addresses.reset_jpeg {
+        profile.type7_full_reason = Some("cmd-wrap");
+        state.last_type7_dirty_bbox = None;
+        return send_full_jpeg_frame(
+            state,
+            frame,
+            expected_width,
+            expected_height,
+            output_width,
+            output_height,
+            frame_started,
+            profile,
+        );
+    }
     let packet = Type7JpegTilePacket::new(
         &jpeg,
         addresses.cmd_addr,
         fence_id,
-        output_width,
-        band_height as u16,
-        output_width,
-        canvas_height,
-        start_addr,
-        end_addr,
+        tile_width as u16,
+        tile_height as u16,
+        canvas_width as u16,
+        canvas_height as u16,
+        plane0_addr,
+        plane1_addr,
+        plane2_addr,
     );
     let chunks = packet.bulk_chunks(options.max_packet_size);
+    profile.send_path = SendPath::Type7Tile;
+    dump_type7_packet(
+        state,
+        "type7",
+        &packet.payload,
+        addresses.cmd_addr,
+        fence_id,
+        &chunks,
+    )?;
     profile.packet = packet_started.elapsed();
     if let Some(device) = &state.device {
         let usb_timing = send_chunks_with_context(device, &chunks, "jpeg-type7")?;
@@ -2111,6 +2596,250 @@ fn send_jpeg_type7_frame(
         false,
         fence_id,
     ))
+}
+
+fn encode_bgra_jpeg<'a>(
+    state: &'a mut SenderState,
+    bgra: *const u8,
+    width: usize,
+    pitch: usize,
+    height: usize,
+) -> Result<&'a [u8], Box<dyn Error>> {
+    let compressor = state
+        .jpeg_compressor
+        .as_mut()
+        .ok_or("JPEG compressor is not initialized")?;
+    compressor.compress_bgra_ptr(bgra, width, pitch, height, state.current_quality)
+}
+
+fn type7_mode6_jpeg_compat(jpeg: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut patched = jpeg.to_vec();
+    patch_jpeg_type7_mode6_compat(&mut patched)?;
+    Ok(patched)
+}
+
+fn patch_jpeg_type7_mode6_compat(jpeg: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+    patch_jpeg_component_ids_zero_based(jpeg)?;
+    patch_jfif_version_102(jpeg)?;
+    insert_intel_ipp_comment(jpeg)?;
+    Ok(())
+}
+
+fn patch_jfif_version_102(jpeg: &mut [u8]) -> Result<(), Box<dyn Error>> {
+    if jpeg.len() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err("input is not a JPEG file".into());
+    }
+
+    let mut index = 2;
+    while index + 4 <= jpeg.len() {
+        while index < jpeg.len() && jpeg[index] == 0xff {
+            index += 1;
+        }
+        if index >= jpeg.len() {
+            break;
+        }
+        let marker = jpeg[index];
+        index += 1;
+        if marker == 0xda || marker == 0xd9 {
+            break;
+        }
+        if index + 2 > jpeg.len() {
+            break;
+        }
+        let segment_len = u16::from_be_bytes([jpeg[index], jpeg[index + 1]]) as usize;
+        if segment_len < 2 || index + segment_len > jpeg.len() {
+            break;
+        }
+        let payload_start = index + 2;
+        if marker == 0xe0 && segment_len >= 14 && jpeg[payload_start..].starts_with(b"JFIF\0") {
+            jpeg[payload_start + 5] = 0x01;
+            jpeg[payload_start + 6] = 0x02;
+            break;
+        }
+        index += segment_len;
+    }
+
+    Ok(())
+}
+
+fn insert_intel_ipp_comment(jpeg: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
+    const COMMENT: &[u8] = b"Intel(R) IPP JPEG encoder [7.1.37466] - Sep 25 2012;\0";
+    if jpeg.len() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err("input is not a JPEG file".into());
+    }
+    if jpeg.windows(COMMENT.len()).any(|window| window == COMMENT) {
+        return Ok(());
+    }
+
+    let mut insert_at = 2;
+    if jpeg.len() >= 6 && jpeg[2] == 0xff && jpeg[3] == 0xe0 {
+        let segment_len = u16::from_be_bytes([jpeg[4], jpeg[5]]) as usize;
+        if segment_len >= 2 && 4 + segment_len <= jpeg.len() {
+            insert_at = 4 + segment_len;
+        }
+    }
+
+    let segment_len = COMMENT.len() + 2;
+    if segment_len > u16::MAX as usize {
+        return Err("JPEG comment is too large".into());
+    }
+    let mut segment = Vec::with_capacity(COMMENT.len() + 4);
+    segment.extend_from_slice(&[0xff, 0xfe]);
+    segment.extend_from_slice(&(segment_len as u16).to_be_bytes());
+    segment.extend_from_slice(COMMENT);
+    jpeg.splice(insert_at..insert_at, segment);
+    Ok(())
+}
+
+fn patch_jpeg_component_ids_zero_based(jpeg: &mut [u8]) -> Result<(), Box<dyn Error>> {
+    if jpeg.len() < 4 || jpeg[0] != 0xff || jpeg[1] != 0xd8 {
+        return Err("input is not a JPEG file".into());
+    }
+
+    let mut index = 2;
+    while index + 4 <= jpeg.len() {
+        while index < jpeg.len() && jpeg[index] == 0xff {
+            index += 1;
+        }
+        if index >= jpeg.len() {
+            break;
+        }
+
+        let marker = jpeg[index];
+        index += 1;
+
+        if marker == 0xd8 || marker == 0xd9 {
+            continue;
+        }
+        if index + 2 > jpeg.len() {
+            break;
+        }
+
+        let segment_len = u16::from_be_bytes([jpeg[index], jpeg[index + 1]]) as usize;
+        if segment_len < 2 || index + segment_len > jpeg.len() {
+            break;
+        }
+
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if segment_len < 8 {
+                return Err("invalid JPEG SOF segment".into());
+            }
+            let component_count = jpeg[index + 7] as usize;
+            let component_table = index + 8;
+            if component_table + component_count * 3 > index + segment_len {
+                return Err("invalid JPEG SOF component table".into());
+            }
+            for component in 0..component_count.min(3) {
+                jpeg[component_table + component * 3] = component as u8;
+            }
+        } else if marker == 0xda {
+            if segment_len < 4 {
+                return Err("invalid JPEG SOS segment".into());
+            }
+            let component_count = jpeg[index + 2] as usize;
+            let component_table = index + 3;
+            if component_table + component_count * 2 > index + segment_len {
+                return Err("invalid JPEG SOS component table".into());
+            }
+            for component in 0..component_count.min(3) {
+                jpeg[component_table + component * 2] = component as u8;
+            }
+            break;
+        }
+
+        index += segment_len;
+    }
+
+    Ok(())
+}
+
+fn dump_type7_pair_packets(
+    state: &mut SenderState,
+    setup_packet: &Type4Mode6SetupPacket,
+    setup_chunks: &[BulkTransferChunk<'_>],
+    setup_fence_id: u32,
+    type7_packet: &Type7JpegTilePacket,
+    type7_chunks: &[BulkTransferChunk<'_>],
+    type7_fence_id: u32,
+) -> Result<(), Box<dyn Error>> {
+    dump_type7_packet(
+        state,
+        "setup",
+        &setup_packet.payload,
+        setup_packet.payload_address,
+        setup_fence_id,
+        setup_chunks,
+    )?;
+    dump_type7_packet(
+        state,
+        "type7",
+        &type7_packet.payload,
+        type7_packet.payload_address,
+        type7_fence_id,
+        type7_chunks,
+    )
+}
+
+fn dump_type7_packet(
+    state: &mut SenderState,
+    label: &str,
+    payload: &[u8],
+    payload_address: u32,
+    fence_id: u32,
+    chunks: &[BulkTransferChunk<'_>],
+) -> Result<(), Box<dyn Error>> {
+    let Some(dir) = state.options.dump_type7_packets.clone() else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(&dir)?;
+    let index = state.dumped_type7_packets;
+    state.dumped_type7_packets = state.dumped_type7_packets.saturating_add(1);
+    let stem = format!("{index:06}_{label}_seq{fence_id:08x}");
+    fs::write(dir.join(format!("{stem}.bin")), payload)?;
+
+    let mut meta = String::new();
+    meta.push_str(&format!("label={label}\n"));
+    meta.push_str(&format!("sequence=0x{fence_id:08x}\n"));
+    meta.push_str(&format!("payload_address=0x{payload_address:08x}\n"));
+    meta.push_str(&format!("payload_len={}\n", payload.len()));
+    meta.push_str(&format!("chunks={}\n", chunks.len()));
+    for (chunk_index, chunk) in chunks.iter().enumerate() {
+        meta.push_str(&format!(
+            "chunk[{chunk_index}] offset={} size={} more={} header_payload_len={} header_addr=0x{:08x}\n",
+            chunk.header.packet_offset,
+            chunk.header.packet_size,
+            chunk.header.packet_flags != 0,
+            chunk.header.payload_length,
+            chunk.header.payload_address
+        ));
+    }
+    if payload.len() >= 48 {
+        meta.push_str(&format!(
+            "video_type={} data_len={} word08=0x{:08x} word0c=0x{:08x}\n",
+            u32::from_le_bytes(payload[0..4].try_into()?),
+            u32::from_le_bytes(payload[4..8].try_into()?),
+            u32::from_le_bytes(payload[8..12].try_into()?),
+            u32::from_le_bytes(payload[12..16].try_into()?),
+        ));
+    }
+    fs::write(dir.join(format!("{stem}.txt")), meta)?;
+
+    Ok(())
 }
 
 fn run_dirty_tile_jpeg_probe(
@@ -2209,6 +2938,30 @@ fn clamped_dirty_bbox(
     Some((x, y, max_x - x, max_y - y))
 }
 
+fn union_bbox(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+    frame_width: usize,
+    frame_height: usize,
+) -> (usize, usize, usize, usize) {
+    let min_x = a.0.min(b.0).min(frame_width);
+    let min_y = a.1.min(b.1).min(frame_height);
+    let max_x =
+        a.0.saturating_add(a.2)
+            .max(b.0.saturating_add(b.2))
+            .min(frame_width);
+    let max_y =
+        a.1.saturating_add(a.3)
+            .max(b.1.saturating_add(b.3))
+            .min(frame_height);
+    (
+        min_x,
+        min_y,
+        max_x.saturating_sub(min_x),
+        max_y.saturating_sub(min_y),
+    )
+}
+
 fn clamped_dirty_rect(
     rect: DirtyRect,
     frame_width: usize,
@@ -2243,6 +2996,73 @@ fn crop_bgra_bbox(
             unsafe { std::slice::from_raw_parts(bgra.add((y + row) * stride + x * 4), row_bytes) };
         let dst = &mut out[row * row_bytes..(row + 1) * row_bytes];
         dst.copy_from_slice(src);
+    }
+}
+
+fn crop_rotated_bgra_bbox(
+    bgra: *const u8,
+    source_width: usize,
+    source_height: usize,
+    source_stride: usize,
+    rotation: Rotation,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    out: &mut Vec<u8>,
+) {
+    let row_bytes = width * 4;
+    out.resize(row_bytes * height, 0);
+
+    if rotation == Rotation::Deg0 {
+        crop_bgra_bbox(bgra, source_stride, x, y, width, height, out);
+        return;
+    }
+
+    match rotation {
+        Rotation::Deg0 => unreachable!(),
+        Rotation::Deg90 => {
+            for out_y in 0..height {
+                let src_x = y + out_y;
+                let dst_row = &mut out[out_y * row_bytes..(out_y + 1) * row_bytes];
+                for out_x in 0..width {
+                    let src_y = source_height - 1 - (x + out_x);
+                    let src = unsafe {
+                        std::slice::from_raw_parts(bgra.add(src_y * source_stride + src_x * 4), 4)
+                    };
+                    let dst = out_x * 4;
+                    dst_row[dst..dst + 4].copy_from_slice(src);
+                }
+            }
+        }
+        Rotation::Deg180 => {
+            for out_y in 0..height {
+                let src_y = source_height - 1 - (y + out_y);
+                let dst_row = &mut out[out_y * row_bytes..(out_y + 1) * row_bytes];
+                for out_x in 0..width {
+                    let src_x = source_width - 1 - (x + out_x);
+                    let src = unsafe {
+                        std::slice::from_raw_parts(bgra.add(src_y * source_stride + src_x * 4), 4)
+                    };
+                    let dst = out_x * 4;
+                    dst_row[dst..dst + 4].copy_from_slice(src);
+                }
+            }
+        }
+        Rotation::Deg270 => {
+            for out_y in 0..height {
+                let src_x = source_width - 1 - (y + out_y);
+                let dst_row = &mut out[out_y * row_bytes..(out_y + 1) * row_bytes];
+                for out_x in 0..width {
+                    let src_y = x + out_x;
+                    let src = unsafe {
+                        std::slice::from_raw_parts(bgra.add(src_y * source_stride + src_x * 4), 4)
+                    };
+                    let dst = out_x * 4;
+                    dst_row[dst..dst + 4].copy_from_slice(src);
+                }
+            }
+        }
     }
 }
 
@@ -2330,6 +3150,63 @@ fn format_interrupt_summary(summary: Option<InterruptWaitSummary>) -> String {
     }
 }
 
+fn format_type7_tile_summary(tile: Option<Type7TileProfile>) -> String {
+    match tile {
+        Some(tile) => format!(
+            " type7_tile={}x{}+{}+{} tile_area={:.1}% tile_q={} plane0=0x{:08x} plane1=0x{:08x} plane2=0x{:08x}",
+            tile.width,
+            tile.height,
+            tile.x,
+            tile.y,
+            tile.area_ratio * 100.0,
+            tile.jpeg_quality,
+            tile.plane0_addr,
+            tile.plane1_addr,
+            tile.plane2_addr
+        ),
+        None => String::new(),
+    }
+}
+
+fn type7_tile_quality(options: &Options, current_quality: i32, tile_ratio: f64) -> i32 {
+    match options.type7_large_tile_quality {
+        Some(quality) if tile_ratio >= options.type7_large_tile_ratio => quality,
+        _ => current_quality,
+    }
+}
+
+fn format_type7_full_reason(reason: Option<&'static str>) -> String {
+    match reason {
+        Some(reason) => format!(" type7_full_reason={reason}"),
+        None => String::new(),
+    }
+}
+
+fn format_setup_ack_summary(summary: Option<InterruptWaitSummary>) -> String {
+    match summary {
+        Some(summary) => format!(
+            " setup_ack_packets={} setup_ack_fences={} setup_ack_matched={} setup_ack_lag={} setup_ack_last=0x{:08x}",
+            summary.packets,
+            summary.fences,
+            summary.matched_fences,
+            summary.ack_lag(),
+            summary.last_data
+        ),
+        None => String::new(),
+    }
+}
+
+fn format_send_path(path: SendPath) -> &'static str {
+    match path {
+        SendPath::Unknown => "unknown",
+        SendPath::FullJpeg => "full-jpeg",
+        SendPath::Type4Setup => "type4-setup",
+        SendPath::Type4SetupOnly => "type4-setup-only",
+        SendPath::Type4SetupAndType7 => "type4+type7",
+        SendPath::Type7Tile => "type7",
+    }
+}
+
 fn next_fence_id(state: &mut SenderState) -> u32 {
     let fence_id = state.next_fence_id;
     state.next_fence_id = state.next_fence_id.wrapping_add(1).max(1);
@@ -2360,12 +3237,22 @@ fn drop_late_frame(state: &mut SenderState, mut profile: ProfileSample, frame_st
 }
 
 fn resync_next_send_at(state: &mut SenderState, now: Instant) {
-    let next = state.next_send_at + state.frame_interval;
-    state.next_send_at = if now > next + state.frame_interval {
-        now
-    } else {
-        next
-    };
+    resync_next_send_at_with_divisor(state, now, 1);
+}
+
+fn resync_next_send_at_for_profile(state: &mut SenderState, now: Instant, profile: ProfileSample) {
+    let divisor = profile
+        .type7_tile
+        .filter(|tile| tile.area_ratio >= state.options.type7_large_tile_ratio)
+        .map(|_| state.options.type7_large_tile_fps_divisor.max(1))
+        .unwrap_or(1);
+    resync_next_send_at_with_divisor(state, now, divisor);
+}
+
+fn resync_next_send_at_with_divisor(state: &mut SenderState, now: Instant, divisor: u32) {
+    let interval = state.frame_interval * divisor;
+    let next = state.next_send_at + interval;
+    state.next_send_at = if now > next + interval { now } else { next };
 }
 
 fn adapt_jpeg_quality(state: &mut SenderState, total: Duration) {
@@ -2921,6 +3808,118 @@ fn align_usize(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
 }
 
+fn type7_update_rect(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    canvas_width: usize,
+    canvas_height: usize,
+    mode: Type7RectMode,
+) -> Option<(usize, usize, usize, usize)> {
+    let local = align_type7_rect_32(x, y, width, height, canvas_width, canvas_height)?;
+    let horizontal = (0, local.1, canvas_width, local.3);
+    let vertical = (local.0, 0, local.2, canvas_height);
+
+    let selected = match mode {
+        Type7RectMode::Local => local,
+        Type7RectMode::HorizontalBand => horizontal,
+        Type7RectMode::VerticalBand => vertical,
+        Type7RectMode::Auto => {
+            let local_area = local.2.saturating_mul(local.3);
+            let horizontal_area = horizontal.2.saturating_mul(horizontal.3);
+            let vertical_area = vertical.2.saturating_mul(vertical.3);
+            if local_area <= horizontal_area && local_area <= vertical_area {
+                local
+            } else if horizontal_area <= vertical_area {
+                horizontal
+            } else {
+                vertical
+            }
+        }
+    };
+
+    if selected.2 == 0 || selected.3 == 0 {
+        None
+    } else {
+        Some(selected)
+    }
+}
+
+fn align_type7_rect_32(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    canvas_width: usize,
+    canvas_height: usize,
+) -> Option<(usize, usize, usize, usize)> {
+    if width == 0 || height == 0 || canvas_width == 0 || canvas_height == 0 {
+        return None;
+    }
+
+    let mut left = x.saturating_sub(1) / 32 * 32;
+    let mut top = y.saturating_sub(1) / 32 * 32;
+    let mut right = align_usize(x.saturating_add(width).saturating_add(31), 32).min(canvas_width);
+    let mut bottom =
+        align_usize(y.saturating_add(height).saturating_add(31), 32).min(canvas_height);
+
+    if right <= left || bottom <= top {
+        return None;
+    }
+
+    if right - left < 32 {
+        if right == canvas_width {
+            left = left.saturating_sub(32 - (right - left));
+        } else {
+            right = (left + 32).min(canvas_width);
+        }
+    }
+    if bottom - top < 32 {
+        if bottom == canvas_height {
+            top = top.saturating_sub(32 - (bottom - top));
+        } else {
+            bottom = (top + 32).min(canvas_height);
+        }
+    }
+
+    Some((left, top, right - left, bottom - top))
+}
+
+fn type7_mode6_plane_addrs(
+    allocated_base: u32,
+    left: usize,
+    top: usize,
+    output_width: usize,
+    output_height: usize,
+    canvas_width: usize,
+    _canvas_height: usize,
+) -> (u32, u32, u32) {
+    let (base0, base1, _) = type7_mode6_slot_bases(allocated_base, output_width, output_height);
+    let plane0 = base0
+        .saturating_add((canvas_width as u32).saturating_mul(top as u32))
+        .saturating_add(left as u32);
+    let plane1 = base1
+        .saturating_add(((top / 2) as u32).saturating_mul(canvas_width as u32))
+        .saturating_add(((left / 2) as u32).saturating_mul(2));
+
+    (plane0, plane1, 0)
+}
+
+fn type7_mode6_slot_bases(
+    allocated_base: u32,
+    output_width: usize,
+    output_height: usize,
+) -> (u32, u32, u32) {
+    let tile_blocks = output_width
+        .div_ceil(16)
+        .saturating_mul(output_height.div_ceil(16));
+    let plane_span = (tile_blocks as u32).saturating_mul(0x100);
+    let base0 = allocated_base.saturating_add(0x30);
+    let base1 = base0.saturating_add(plane_span);
+    (base0, base1, 0)
+}
+
 fn copy_bgra_to_rgb(
     bgra: *const u8,
     width: usize,
@@ -3137,9 +4136,23 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut power_on = false;
     let mut reset_jpeg_engine = false;
     let mut profile = false;
+    let mut report_every = 60;
     let mut async_send = false;
+    let mut frame_throttle = true;
     let mut drop_late_frames = false;
     let mut unsafe_generated_type7 = false;
+    let mut type7_rect_mode = Type7RectMode::HorizontalBand;
+    let mut type7_ring_mode = Type7RingMode::Windows;
+    let mut type7_refresh_frames = 30;
+    let mut type7_min_band_ratio = 0.20;
+    let mut type7_min_local_area_ratio = 0.005;
+    let mut type7_max_tile_ratio = 0.70;
+    let mut type7_large_tile_ratio = 0.25;
+    let mut type7_large_tile_quality = None;
+    let mut type7_large_tile_fps_divisor = 1;
+    let mut type7_setup_mode = Type7SetupMode::LegacyFullJpeg;
+    let mut type7_wait_setup_ack_ms = 0;
+    let mut type7_setup_only = false;
     let mut dirty_mode = DirtyMode::Log;
     let mut dry_run = false;
     let mut ram_size_mb = None;
@@ -3149,6 +4162,9 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     let mut max_packet_size = DEFAULT_MAX_BULK_PACKET_SIZE;
     let mut dump_first_frame = None;
     let mut dump_first_frame_delay_ms = 0;
+    let mut dump_type7_packets = None;
+    let mut type7_cmd_addr = None;
+    let mut type7_cmd_wrap_addr = None;
     let mut args = env::args().skip(1);
 
     while let Some(arg) = args.next() {
@@ -3189,9 +4205,50 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--power-on" => power_on = true,
             "--reset-jpeg-engine" => reset_jpeg_engine = true,
             "--profile" => profile = true,
+            "--report-every" => report_every = next_value(&mut args, "--report-every")?.parse()?,
             "--async-send" => async_send = true,
+            "--no-frame-throttle" => frame_throttle = false,
             "--drop-late-frames" => drop_late_frames = true,
             "--unsafe-generated-type7" => unsafe_generated_type7 = true,
+            "--type7-rect" => {
+                type7_rect_mode = parse_type7_rect_mode(&next_value(&mut args, "--type7-rect")?)?
+            }
+            "--type7-ring" => {
+                type7_ring_mode = parse_type7_ring_mode(&next_value(&mut args, "--type7-ring")?)?
+            }
+            "--type7-refresh-frames" => {
+                type7_refresh_frames = next_value(&mut args, "--type7-refresh-frames")?.parse()?
+            }
+            "--type7-min-band-ratio" => {
+                type7_min_band_ratio = next_value(&mut args, "--type7-min-band-ratio")?.parse()?
+            }
+            "--type7-min-local-area-ratio" => {
+                type7_min_local_area_ratio =
+                    next_value(&mut args, "--type7-min-local-area-ratio")?.parse()?
+            }
+            "--type7-max-tile-ratio" => {
+                type7_max_tile_ratio = next_value(&mut args, "--type7-max-tile-ratio")?.parse()?
+            }
+            "--type7-large-tile-ratio" => {
+                type7_large_tile_ratio =
+                    next_value(&mut args, "--type7-large-tile-ratio")?.parse()?
+            }
+            "--type7-large-tile-quality" => {
+                type7_large_tile_quality =
+                    Some(next_value(&mut args, "--type7-large-tile-quality")?.parse()?)
+            }
+            "--type7-large-tile-fps-divisor" => {
+                type7_large_tile_fps_divisor =
+                    next_value(&mut args, "--type7-large-tile-fps-divisor")?.parse()?
+            }
+            "--type7-setup" => {
+                type7_setup_mode = parse_type7_setup_mode(&next_value(&mut args, "--type7-setup")?)?
+            }
+            "--type7-wait-setup-ack-ms" => {
+                type7_wait_setup_ack_ms =
+                    next_value(&mut args, "--type7-wait-setup-ack-ms")?.parse()?
+            }
+            "--type7-setup-only" => type7_setup_only = true,
             "--dirty-mode" => {
                 dirty_mode = parse_dirty_mode(&next_value(&mut args, "--dirty-mode")?)?
             }
@@ -3213,6 +4270,19 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
             "--dump-first-frame-delay-ms" => {
                 dump_first_frame_delay_ms =
                     next_value(&mut args, "--dump-first-frame-delay-ms")?.parse()?
+            }
+            "--dump-type7-packets" => {
+                dump_type7_packets = Some(PathBuf::from(next_value(
+                    &mut args,
+                    "--dump-type7-packets",
+                )?))
+            }
+            "--type7-cmd-addr" => {
+                type7_cmd_addr = Some(parse_u32(&next_value(&mut args, "--type7-cmd-addr")?)?)
+            }
+            "--type7-cmd-wrap-addr" => {
+                type7_cmd_wrap_addr =
+                    Some(parse_u32(&next_value(&mut args, "--type7-cmd-wrap-addr")?)?)
             }
             "-h" | "--help" => {
                 print_help();
@@ -3236,6 +4306,32 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
     }
     if jpeg_encoder == JpegEncoder::VideoToolbox && transport != Transport::Jpeg {
         return Err("--jpeg-encoder videotoolbox currently requires --transport jpeg".into());
+    }
+    if !(0.0..=1.0).contains(&type7_min_band_ratio) {
+        return Err("--type7-min-band-ratio must be 0.0..1.0".into());
+    }
+    if !(0.0..=1.0).contains(&type7_min_local_area_ratio) {
+        return Err("--type7-min-local-area-ratio must be 0.0..1.0".into());
+    }
+    if !(0.0..=1.0).contains(&type7_max_tile_ratio) {
+        return Err("--type7-max-tile-ratio must be 0.0..1.0".into());
+    }
+    if !(0.0..=1.0).contains(&type7_large_tile_ratio) {
+        return Err("--type7-large-tile-ratio must be 0.0..1.0".into());
+    }
+    if let Some(type7_large_tile_quality) = type7_large_tile_quality {
+        if !(1..=100).contains(&type7_large_tile_quality) {
+            return Err("--type7-large-tile-quality must be 1..100".into());
+        }
+    }
+    if type7_large_tile_fps_divisor == 0 {
+        return Err("--type7-large-tile-fps-divisor must be at least 1".into());
+    }
+    if let (Some(type7_cmd_addr), Some(type7_cmd_wrap_addr)) = (type7_cmd_addr, type7_cmd_wrap_addr)
+    {
+        if type7_cmd_wrap_addr <= type7_cmd_addr {
+            return Err("--type7-cmd-wrap-addr must be greater than --type7-cmd-addr".into());
+        }
     }
 
     Ok(Options {
@@ -3261,9 +4357,23 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         power_on,
         reset_jpeg_engine,
         profile,
+        report_every,
         async_send,
+        frame_throttle,
         drop_late_frames,
         unsafe_generated_type7,
+        type7_rect_mode,
+        type7_ring_mode,
+        type7_refresh_frames,
+        type7_min_band_ratio,
+        type7_min_local_area_ratio,
+        type7_max_tile_ratio,
+        type7_large_tile_ratio,
+        type7_large_tile_quality,
+        type7_large_tile_fps_divisor,
+        type7_setup_mode,
+        type7_wait_setup_ack_ms,
+        type7_setup_only,
         dirty_mode,
         dry_run,
         ram_size_mb,
@@ -3273,7 +4383,40 @@ fn parse_options() -> Result<Options, Box<dyn Error>> {
         max_packet_size,
         dump_first_frame,
         dump_first_frame_delay_ms,
+        dump_type7_packets,
+        type7_cmd_addr,
+        type7_cmd_wrap_addr,
     })
+}
+
+fn parse_type7_rect_mode(value: &str) -> Result<Type7RectMode, Box<dyn Error>> {
+    match value {
+        "auto" => Ok(Type7RectMode::Auto),
+        "local" => Ok(Type7RectMode::Local),
+        "horizontal-band" | "hband" => Ok(Type7RectMode::HorizontalBand),
+        "vertical-band" | "vband" => Ok(Type7RectMode::VerticalBand),
+        _ => Err("--type7-rect must be one of auto, local, horizontal-band, vertical-band".into()),
+    }
+}
+
+fn parse_type7_ring_mode(value: &str) -> Result<Type7RingMode, Box<dyn Error>> {
+    match value {
+        "windows" | "win" => Ok(Type7RingMode::Windows),
+        "legacy" => Ok(Type7RingMode::Legacy),
+        _ => Err("--type7-ring must be one of windows, legacy".into()),
+    }
+}
+
+fn parse_type7_setup_mode(value: &str) -> Result<Type7SetupMode, Box<dyn Error>> {
+    match value {
+        "legacy-full-jpeg" | "legacy" | "full-jpeg" => Ok(Type7SetupMode::LegacyFullJpeg),
+        "synthetic-type4" | "type4" => Ok(Type7SetupMode::SyntheticType4),
+        "paired-type4-type7" | "paired" => Ok(Type7SetupMode::PairedType4Type7),
+        _ => Err(
+            "--type7-setup must be one of legacy-full-jpeg, synthetic-type4, paired-type4-type7"
+                .into(),
+        ),
+    }
 }
 
 fn parse_dirty_mode(value: &str) -> Result<DirtyMode, Box<dyn Error>> {
@@ -3428,10 +4571,37 @@ Options:\n\
     --power-on              Send monitor power-on before capture\n\
     --reset-jpeg-engine     Send vendor JPEG engine reset before capture\n\
     --profile               Print average convert/encode/packet/USB timings every 60 sent frames\n\
+    --report-every N        Print frame status every N sent frames, default 60; 0 disables periodic status\n\
     --async-send            Copy latest captured frame in the callback and send from a worker thread\n\
+    --no-frame-throttle     Send every callback frame instead of dropping callbacks before the next frame deadline\n\
     --drop-late-frames      Drop JPEG frames after encode if they already missed the frame budget\n\
     --unsafe-generated-type7\n\
                             Enable generated type7 dirty JPEG updates. Experimental; can corrupt display state\n\
+    --type7-rect auto|local|horizontal-band|vertical-band\n\
+                            Type7 dirty rectangle shaping, default horizontal-band\n\
+    --type7-ring windows|legacy\n\
+                            Type7 payload ring allocator, default windows\n\
+    --type7-refresh-frames N\n\
+                            Send a full JPEG refresh every N Type7-capable frames, default 30; 0 disables periodic refresh\n\
+    --type7-min-band-ratio N\n\
+                            Fall back to full JPEG when a Type7 band is smaller than this screen ratio, default 0.20\n\
+    --type7-min-local-area-ratio N\n\
+                            Fall back to full JPEG when a Type7 local tile is smaller than this screen area ratio, default 0.005\n\
+    --type7-max-tile-ratio N\n\
+                            Fall back to full JPEG when a Type7 tile is larger than this screen area ratio, default 0.70\n\
+    --type7-large-tile-ratio N\n\
+                            Tile area ratio threshold for --type7-large-tile-quality, default 0.25\n\
+    --type7-large-tile-quality N\n\
+                            Override JPEG quality for large Type7 tiles only; disabled by default\n\
+    --type7-large-tile-fps-divisor N\n\
+                            Send large Type7 tiles every N frame intervals, default 1; use 2 for 30fps at --fps 60\n\
+    --type7-setup legacy-full-jpeg|synthetic-type4|paired-type4-type7\n\
+                            Full refresh/setup strategy for jpeg-type7, default legacy-full-jpeg\n\
+    --type7-wait-setup-ack-ms N\n\
+                            In paired Type4+Type7 mode, wait up to N ms for setup ack before Type7, default 0\n\
+    --type7-setup-only      In paired Type4+Type7 mode, send only the Type4 setup packet and skip Type7\n\
+    --type7-cmd-addr N      Override Type7 command ring start address, e.g. 0x03500000\n\
+    --type7-cmd-wrap-addr N Override Type7 command ring wrap address, default VRAM size\n\
     --dirty-mode off|log|bbox|tile-send\n\
                             Dirty rect profiling mode, default log. bbox/tile-send crop-encode dirty rect tiles for measurement only\n\
     --dry-run               Capture/encode/packetize but do not open USB or send\n\
@@ -3442,15 +4612,18 @@ Options:\n\
     --max-packet N          Bulk fragment size, default 0x19000\n\
     --dump-first-frame PATH Save a captured BGRA frame after RGB conversion\n\
     --dump-first-frame-delay-ms N\n\
-                            Wait at least N ms before saving --dump-first-frame"
+                            Wait at least N ms before saving --dump-first-frame\n\
+    --dump-type7-packets DIR\n\
+                            Save generated Type4/Type7 video payloads and bulk metadata for byte comparison"
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ChromaMode, Rotation, YuvMatrix, YuvRange, bgra_to_nv12, bgra_to_yv12, rgb_to_nv12,
-        rgb_to_yv12, rotate_bgra_with_vimage, source_coordinate,
+        ChromaMode, Rotation, YuvMatrix, YuvRange, bgra_to_nv12, bgra_to_yv12,
+        patch_jpeg_component_ids_zero_based, rgb_to_nv12, rgb_to_yv12, rotate_bgra_with_vimage,
+        source_coordinate, type7_mode6_plane_addrs,
     };
 
     #[test]
@@ -3548,6 +4721,30 @@ mod tests {
 
             assert_eq!(rotated_rgb, expected_rgb, "rotation {rotation:?}");
         }
+    }
+
+    #[test]
+    fn type7_mode6_chroma_address_uses_canvas_width_stride() {
+        let (plane0, plane1, plane2) =
+            type7_mode6_plane_addrs(0x0295_56c0, 0, 128, 1920, 1080, 1920, 1920);
+
+        assert_eq!(plane0, 0x0299_16f0);
+        assert_eq!(plane1, 0x02b7_16f0);
+        assert_eq!(plane2, 0);
+    }
+
+    #[test]
+    fn type7_jpeg_component_patch_rewrites_sof_and_sos_ids() {
+        let mut jpeg = vec![
+            0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10, 0x03, 0x01, 0x22,
+            0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00,
+            0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0xff, 0xd9,
+        ];
+
+        patch_jpeg_component_ids_zero_based(&mut jpeg).unwrap();
+
+        assert_eq!(&jpeg[12..21], &[0, 0x22, 0, 1, 0x11, 1, 2, 0x11, 1]);
+        assert_eq!(&jpeg[26..32], &[0, 0, 1, 0x11, 2, 0x11]);
     }
 
     fn sample_rgb_4x2() -> Vec<u8> {

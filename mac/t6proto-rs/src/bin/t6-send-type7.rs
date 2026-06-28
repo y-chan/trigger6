@@ -203,6 +203,7 @@ fn make_packet(
         options.canvas_height,
         start_addr,
         end_addr,
+        0,
     )
 }
 

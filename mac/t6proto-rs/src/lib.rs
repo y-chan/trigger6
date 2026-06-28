@@ -62,6 +62,7 @@ pub const DEFAULT_MAX_BULK_PACKET_SIZE: u32 = 0x19000;
 pub const JPEG_PADDING_SIZE: usize = 1024;
 pub const VIDEO_FLAG_RESET_JPEG: u8 = 0x80;
 pub const TYPE7_JPEG_TILE_HEADER_SIZE: usize = 48;
+pub const TYPE4_MODE6_SETUP_HEADER_SIZE: usize = 48;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Edid {
@@ -492,6 +493,72 @@ pub struct Type7JpegTilePacket {
     pub payload: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Type4Mode6SetupPacket {
+    pub payload_address: u32,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Type4Mode6SetupHeader {
+    pub video_type: u32,
+    pub data_len: u32,
+    pub sequence: u32,
+    pub mode: u32,
+    pub canvas: u32,
+    pub base0_addr: u32,
+    pub base1_addr: u32,
+    pub base2_addr: u32,
+    pub image_format: u32,
+    pub reserved1: u32,
+    pub reserved2: u32,
+    pub reserved3: u32,
+}
+
+impl Type4Mode6SetupHeader {
+    pub fn jpeg(
+        payload_len: usize,
+        sequence: u32,
+        canvas_width: u16,
+        canvas_height: u16,
+        base0_addr: u32,
+        base1_addr: u32,
+        base2_addr: u32,
+    ) -> Self {
+        Self {
+            video_type: 4,
+            data_len: payload_len.saturating_sub(TYPE4_MODE6_SETUP_HEADER_SIZE) as u32,
+            sequence,
+            mode: 6,
+            canvas: (u32::from(canvas_height) << 16) | u32::from(canvas_width),
+            base0_addr,
+            base1_addr,
+            base2_addr,
+            image_format: VIDEO_COLOR_JPEG,
+            reserved1: 0,
+            reserved2: 0,
+            reserved3: 0,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; TYPE4_MODE6_SETUP_HEADER_SIZE] {
+        let mut out = [0; TYPE4_MODE6_SETUP_HEADER_SIZE];
+        out[0..4].copy_from_slice(&self.video_type.to_le_bytes());
+        out[4..8].copy_from_slice(&self.data_len.to_le_bytes());
+        out[8..12].copy_from_slice(&self.sequence.to_le_bytes());
+        out[12..16].copy_from_slice(&self.mode.to_le_bytes());
+        out[16..20].copy_from_slice(&self.canvas.to_le_bytes());
+        out[20..24].copy_from_slice(&self.base0_addr.to_le_bytes());
+        out[24..28].copy_from_slice(&self.base1_addr.to_le_bytes());
+        out[28..32].copy_from_slice(&self.base2_addr.to_le_bytes());
+        out[32..36].copy_from_slice(&self.image_format.to_le_bytes());
+        out[36..40].copy_from_slice(&self.reserved1.to_le_bytes());
+        out[40..44].copy_from_slice(&self.reserved2.to_le_bytes());
+        out[44..48].copy_from_slice(&self.reserved3.to_le_bytes());
+        out
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Type7JpegTileHeader {
     pub tile_type: u32,
@@ -500,9 +567,9 @@ pub struct Type7JpegTileHeader {
     pub hint: u32,
     pub size: u32,
     pub canvas: u32,
-    pub start_addr: u32,
-    pub end_addr: u32,
-    pub reserved: u32,
+    pub plane0_addr: u32,
+    pub plane1_addr: u32,
+    pub plane2_addr: u32,
     pub image_format: u32,
     pub reserved2: u32,
     pub reserved3: u32,
@@ -510,25 +577,26 @@ pub struct Type7JpegTileHeader {
 
 impl Type7JpegTileHeader {
     pub fn jpeg(
-        jpeg_len: usize,
+        data_len: usize,
         sequence: u32,
         width: u16,
         height: u16,
         canvas_width: u16,
         canvas_height: u16,
-        start_addr: u32,
-        end_addr: u32,
+        plane0_addr: u32,
+        plane1_addr: u32,
+        plane2_addr: u32,
     ) -> Self {
         Self {
             tile_type: 7,
-            data_len: (jpeg_len + TYPE7_JPEG_TILE_HEADER_SIZE) as u32,
+            data_len: data_len as u32,
             sequence,
             hint: 6,
             size: (u32::from(height) << 16) | u32::from(width),
             canvas: (u32::from(canvas_height) << 16) | u32::from(canvas_width),
-            start_addr,
-            end_addr,
-            reserved: 0,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
             image_format: VIDEO_COLOR_JPEG,
             reserved2: 0,
             reserved3: 0,
@@ -543,9 +611,9 @@ impl Type7JpegTileHeader {
         out[12..16].copy_from_slice(&self.hint.to_le_bytes());
         out[16..20].copy_from_slice(&self.size.to_le_bytes());
         out[20..24].copy_from_slice(&self.canvas.to_le_bytes());
-        out[24..28].copy_from_slice(&self.start_addr.to_le_bytes());
-        out[28..32].copy_from_slice(&self.end_addr.to_le_bytes());
-        out[32..36].copy_from_slice(&self.reserved.to_le_bytes());
+        out[24..28].copy_from_slice(&self.plane0_addr.to_le_bytes());
+        out[28..32].copy_from_slice(&self.plane1_addr.to_le_bytes());
+        out[32..36].copy_from_slice(&self.plane2_addr.to_le_bytes());
         out[36..40].copy_from_slice(&self.image_format.to_le_bytes());
         out[40..44].copy_from_slice(&self.reserved2.to_le_bytes());
         out[44..48].copy_from_slice(&self.reserved3.to_le_bytes());
@@ -812,6 +880,55 @@ impl RawFramePacket {
     }
 }
 
+impl Type4Mode6SetupPacket {
+    pub fn new(
+        jpeg: &[u8],
+        payload_address: u32,
+        sequence: u32,
+        canvas_width: u16,
+        canvas_height: u16,
+        base0_addr: u32,
+        base1_addr: u32,
+        base2_addr: u32,
+    ) -> Self {
+        let payload_len = type7_jpeg_cmd_offset(jpeg.len()) as usize;
+        let header = Type4Mode6SetupHeader::jpeg(
+            payload_len,
+            sequence,
+            canvas_width,
+            canvas_height,
+            base0_addr,
+            base1_addr,
+            base2_addr,
+        );
+        let mut payload = Vec::with_capacity(payload_len);
+        payload.extend_from_slice(&header.to_bytes());
+        payload.extend_from_slice(jpeg);
+        payload.resize(payload_len, 0);
+
+        Self {
+            payload_address,
+            payload,
+        }
+    }
+
+    pub fn bulk_chunks(&self, max_packet_size: u32) -> Vec<BulkTransferChunk<'_>> {
+        fragments(self.payload.len() as u32, max_packet_size)
+            .map(|fragment| BulkTransferChunk {
+                header: BulkDmaHeader::display(
+                    self.payload.len() as u32,
+                    self.payload_address,
+                    fragment.size,
+                    fragment.offset,
+                    fragment.more,
+                ),
+                data: &self.payload
+                    [fragment.offset as usize..(fragment.offset + fragment.size) as usize],
+            })
+            .collect()
+    }
+}
+
 impl Type7JpegTilePacket {
     pub fn new(
         jpeg: &[u8],
@@ -821,22 +938,26 @@ impl Type7JpegTilePacket {
         height: u16,
         canvas_width: u16,
         canvas_height: u16,
-        start_addr: u32,
-        end_addr: u32,
+        plane0_addr: u32,
+        plane1_addr: u32,
+        plane2_addr: u32,
     ) -> Self {
+        let payload_len = type7_jpeg_cmd_offset(jpeg.len()) as usize;
         let header = Type7JpegTileHeader::jpeg(
-            jpeg.len(),
+            payload_len.saturating_sub(TYPE7_JPEG_TILE_HEADER_SIZE),
             sequence,
             width,
             height,
             canvas_width,
             canvas_height,
-            start_addr,
-            end_addr,
+            plane0_addr,
+            plane1_addr,
+            plane2_addr,
         );
-        let mut payload = Vec::with_capacity(TYPE7_JPEG_TILE_HEADER_SIZE + jpeg.len());
+        let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&header.to_bytes());
         payload.extend_from_slice(jpeg);
+        payload.resize(payload_len, 0);
 
         Self {
             payload_address,
@@ -905,6 +1026,7 @@ impl VramLayout {
 pub struct FrameScheduler {
     initial_cmd_addr: u32,
     cmd_addr: u32,
+    cmd_wrap_addr: u32,
     fb_addrs: [u32; 3],
     fb_index: usize,
     reset_frames_remaining: u32,
@@ -923,10 +1045,22 @@ impl FrameScheduler {
         Self {
             initial_cmd_addr: layout.cmd_addr,
             cmd_addr: layout.cmd_addr,
+            cmd_wrap_addr: layout.fb_addrs[0],
             fb_addrs: layout.fb_addrs,
             fb_index: 1,
             reset_frames_remaining: 10,
         }
+    }
+
+    pub fn set_cmd_addr(&mut self, cmd_addr: u32) {
+        self.initial_cmd_addr = cmd_addr;
+        self.cmd_addr = cmd_addr;
+    }
+
+    pub fn set_cmd_ring(&mut self, cmd_addr: u32, wrap_addr: u32) {
+        self.initial_cmd_addr = cmd_addr;
+        self.cmd_addr = cmd_addr;
+        self.cmd_wrap_addr = wrap_addr;
     }
 
     pub fn next_jpeg_frame(&mut self, jpeg_len: usize) -> FrameAddresses {
@@ -939,7 +1073,57 @@ impl FrameScheduler {
         let cmd_offset = jpeg_cmd_offset(jpeg_len + JPEG_PADDING_SIZE + VIDEO_FLIP_HEADER_SIZE);
         let mut reset_jpeg = false;
 
-        if self.cmd_addr + cmd_offset > self.fb_addrs[0] {
+        if self.cmd_addr + cmd_offset > self.cmd_wrap_addr {
+            self.cmd_addr = self.initial_cmd_addr;
+            reset_jpeg = true;
+        }
+
+        if self.reset_frames_remaining > 0 {
+            self.reset_frames_remaining -= 1;
+            reset_jpeg = true;
+        }
+
+        let addresses = FrameAddresses {
+            cmd_addr: self.cmd_addr,
+            fb_addr,
+            reset_jpeg,
+            cmd_offset,
+        };
+        self.cmd_addr += cmd_offset;
+
+        addresses
+    }
+
+    pub fn next_type7_jpeg_payload(&mut self, jpeg_len: usize, fb_addr: u32) -> FrameAddresses {
+        let cmd_offset = type7_jpeg_cmd_offset(jpeg_len);
+        let mut reset_jpeg = false;
+
+        if self.cmd_addr + cmd_offset > self.cmd_wrap_addr {
+            self.cmd_addr = self.initial_cmd_addr;
+            reset_jpeg = true;
+        }
+
+        if self.reset_frames_remaining > 0 {
+            self.reset_frames_remaining -= 1;
+            reset_jpeg = true;
+        }
+
+        let addresses = FrameAddresses {
+            cmd_addr: self.cmd_addr,
+            fb_addr,
+            reset_jpeg,
+            cmd_offset,
+        };
+        self.cmd_addr += cmd_offset;
+
+        addresses
+    }
+
+    pub fn next_video_payload_exact(&mut self, payload_len: usize, fb_addr: u32) -> FrameAddresses {
+        let cmd_offset = payload_len as u32;
+        let mut reset_jpeg = false;
+
+        if self.cmd_addr + cmd_offset > self.cmd_wrap_addr {
             self.cmd_addr = self.initial_cmd_addr;
             reset_jpeg = true;
         }
@@ -969,6 +1153,11 @@ pub fn jpeg_cmd_offset(payload_len: usize) -> u32 {
     } else {
         0x300000
     }
+}
+
+pub fn type7_jpeg_cmd_offset(jpeg_len: usize) -> u32 {
+    let aligned = (jpeg_len + 0x450).div_ceil(0x400) * 0x400;
+    aligned.saturating_sub(0x20) as u32
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
