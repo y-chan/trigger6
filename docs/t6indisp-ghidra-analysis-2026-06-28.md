@@ -948,3 +948,345 @@ Implementation should proceed in this order:
 2. Replay or reproduce the setup command that establishes mode-6 surface state.
 3. Generate mode-6 Type7 JPEG using `plane0_addr/plane1_addr` formulas.
 4. Only then optimize dirty-rect grouping, surface rotation, and ack pacing.
+
+## Surface slot rotation
+
+Later analysis shows that surface slot rotation is more important than the earlier low-priority list implied.
+It is a plausible cause of packets being sent promptly while visible updates appear late.
+
+The allocator is explicit:
+
+```text
+FUN_180100da0:
+  state = allocator + display_index * 0x38
+  for up to 3 attempts:
+    slot = (last_slot + attempt) % 3
+    if state.slot[slot].busy == 0:
+      return state.slot[slot].base_addr and slot
+
+FUN_18010166c:
+  clear any existing slot with the same fence/value
+  mark selected slot busy
+  store selected slot as last_slot
+```
+
+Each display/session has three `0x0c` slot records inside a `0x38` allocator record.
+The initial slot bases are seeded by `FUN_180100fbc`.
+For the observed 1080p mode-6 path, the visible bases line up as:
+
+```text
+slot0 allocated_base = 0x02500400
+slot1 allocated_base = 0x029556c0
+slot2 allocated_base = 0x02daa980
+slot_delta          = 0x004552c0
+
+slot0 plane0 base = 0x02500430
+slot1 plane0 base = 0x029556f0
+slot2 plane0 base = 0x02daa9b0
+```
+
+The `+0x30` is the header/data offset added by the setup functions before saving `base0`.
+
+This explains the observed zone families:
+
+```text
+0x025... addresses: slot0 plus mode-6 dirty offset
+0x029... addresses: slot1 plus mode-6 dirty offset
+0x02d... addresses: slot2 plus mode-6 dirty offset
+```
+
+Examples from `win_type7_addr_yscan_64x64.pcapng`:
+
+```text
+0x02500430-0x026fe430  slot0, top=0
+0x029556f0-0x02b536f0  slot1, top=0
+0x02daa9b0-0x02fa89b0  slot2, top=0
+
+0x026e0430-0x027ee430  slot0, top=1024
+0x02b356f0-0x02c436f0  slot1, top=1024
+0x02f8a9b0-0x030989b0  slot2, top=1024
+
+0x0251ea30-0x0270da30  slot0, top=64, left=1536
+0x02973bd0-0x02b62bd0  slot1, top=64, left=1248
+0x02dc8fb0-0x02fb7fb0  slot2, top=64, left=1536
+```
+
+The `top` and `left` values above are obtained by reversing the mode-6 formula:
+
+```text
+plane0_addr = slot_plane0_base + 1920 * top + left
+plane1_addr = slot_plane1_base + 1920 * (top / 2) + 2 * (left / 2)
+```
+
+The spans also line up:
+
+```text
+span = plane1_addr - plane0_addr
+     = base_span - 960 * top
+
+top=0:    0x1fe000
+top=64:   0x1ef000
+top=1024: 0x10e000
+```
+
+Capture timing check:
+
+`win_type7_addr_yscan_64x64.pcapng` shows Type7 zone changes after setup-like `type=4` packets.
+For example:
+
+```text
+frame 5845: type=4, size=1920x1920, pair=0x2500430-0x26fe430
+frame 5849: type=7, size=1920x96,   pair=0x2500430-0x26fe430
+
+frame 6050: type=4, size=1920x1920, pair=0x29556f0-0x2b536f0
+frame 6070: type=7, size=1920x32,   pair=0x29556f0-0x2b536f0
+```
+
+This means the setup packet is not just a historical artifact.
+It appears to establish the active surface slot that later Type7 packets update.
+
+Implementation implication:
+
+- A generated Type7 path that always writes to the `0x025...` zone may be writing to a stale or currently non-visible surface.
+- Delayed visible reflection is consistent with updating a surface slot that becomes visible only after a later setup/flip/rotation event.
+- The safer implementation path is to replay or generate the setup packet that selects the surface slot, then send Type7 updates against the same slot.
+- If synthetic setup is not implemented yet, rotating Type7 plane bases across the three observed slot bases may reduce staleness, but it is less correct than reproducing the setup/allocator state.
+
+Updated priority:
+
+Surface slot rotation is no longer a purely low-priority unknown.
+For reliable generated Type7, the implementation should either:
+
+1. replay captured setup + Type7 groups unchanged; or
+2. implement the mode-6 setup packet and allocator rotation before sending generated Type7 updates.
+
+## Mode-6 selector and setup origin
+
+The mode-6 path is selected by an internal byte at `device_context + 0xdb0`.
+This is not the Type7 header mode itself.
+It is an internal selector that the setup builders translate into protocol mode fields.
+
+The relevant writes are now identified:
+
+```text
+FUN_1800fadb0:
+  context+0xdac = 0x5f
+  context+0xdb0 = 3
+
+FUN_1800fb240:
+  context+0xdac = 0x5f
+  context+0xdb0 = 3
+  context+0xda8 = 0
+  context+0xda5 = 0
+  context+0xda2 = 0
+  context+0x148 = 0x1fa400
+```
+
+`FUN_1800fadb0` is a broader initialization path.
+It initializes the two queued-update slots at `context+0x150` and `context+0x6c0`, creates events, and sets `context+0xdb0 = 3`.
+`FUN_1800fb240` is a lighter config/default path that also sets `context+0xdb0 = 3`, then reads registry-style values named `MctQuality`, `FlipMode`, `YV12`, and `DetectMonitor`.
+
+Important distinction:
+
+- `YV12` updates `context+0xda3`, not `context+0xdb0`.
+- `MctQuality` updates `context+0xdac`, not `context+0xdb0`.
+- `FlipMode` updates `context+0xda8`, not `context+0xdb0`.
+- No config read seen so far overrides `context+0xdb0` after the default `3`.
+
+In `FUN_180102638`, `context+0xdb0 == 3` becomes protocol mode `6` for JPEG setup:
+
+```text
+if context+0xdb0 == 0:
+  setup mode = 0x0b
+  base0 = allocated_base + 0x30
+  base1 = base0 + plane_span
+  base2 = base0 + 2 * plane_span
+
+if context+0xdb0 == 1:
+  setup mode = 0
+  base0 = allocated_base + 0x30
+  base1 = 0
+  base2 = 0
+
+if context+0xdb0 == 3:
+  setup mode = 6
+  base0 = allocated_base + 0x30
+  base1 = base0 + plane_span
+  base2 = 0
+```
+
+The same selector pattern appears in `FUN_180101134`, another setup builder.
+For `context+0xdb0 == 3`, it also emits protocol mode `6`, with `base2 = 0`.
+That makes mode-6 behavior a general setup-mode branch, not a special case only in the JPEG setup function.
+
+For the observed Windows captures, this explains why the Type7 header mode/source field is consistently `6`:
+
+```text
+init/default context+0xdb0 = 3
+  -> setup packet carries protocol mode 6
+  -> setup saves context+0x110 = 6 and base fields at context+0x114/0x118/0x11c
+  -> Type7 builder reads context+0x110/0x114/0x118/0x11c
+  -> Type7 emits mode-6 plane addresses
+```
+
+Evidence:
+
+- [ghidra_out/1800fadb0_FUN_1800fadb0.c](/C:/Users/y-cha/Documents/trigger6/ghidra_out/1800fadb0_FUN_1800fadb0.c:39)
+- [ghidra_out/1800fb240_FUN_1800fb240.c](/C:/Users/y-cha/Documents/trigger6/ghidra_out/1800fb240_FUN_1800fb240.c:18)
+- [ghidra_out/180101134_FUN_180101134.c](/C:/Users/y-cha/Documents/trigger6/ghidra_out/180101134_FUN_180101134.c:55)
+- [ghidra_out/180102638_FUN_180102638.c](/C:/Users/y-cha/Documents/trigger6/ghidra_out/180102638_FUN_180102638.c:80)
+
+Updated interpretation:
+
+Mode-6 is not an unresolved packet-capture artifact.
+It is the default initialized T6 display surface mode in this driver build.
+The remaining practical risk is not how to derive mode `6`, but how to keep the generated setup/slot state synchronized with the device-visible surface.
+
+## Mode-6 setup packet layout
+
+The mode-6 setup packet seen in captures is `video_type=4`, `image_format=0x0d`.
+It is produced by `FUN_180102638` when the queued record type is `4` and the format selector is `0x0d`.
+The dispatcher is `FUN_1800ff1f0`.
+
+For the observed setup packets, the byte layout is:
+
+```text
++0x00 u32 video_type      = 4
++0x04 u32 data_len        = total video payload minus 0x30 header
++0x08 u32 sequence
++0x0c u32 mode            = 6
++0x10 u16 canvas_width    = 1920
++0x12 u16 canvas_height   = 1920
++0x14 u32 base0           = allocated_slot_base + 0x30
++0x18 u32 base1           = base0 + plane_span
++0x1c u32 base2           = 0
++0x20 u32 image_format    = 0x0d
++0x24 u32 reserved        = 0
++0x28 u32 reserved        = 0
++0x2c u32 reserved        = 0
++0x30 bytes               = JPEG payload starts
+```
+
+Example from `win_type7_addr_yscan_64x64.pcapng` frame `5845`:
+
+```text
+command dest     = 0x03342420
+command total    = 101344
+video data_len   = 101296
+sequence         = 0x58f
+mode             = 6
+canvas           = 1920x1920
+base0/base1/base2= 0x02500430 / 0x026fe430 / 0
+image_format     = 0x0d
+JPEG starts      = +0x30
+```
+
+This exactly matches `FUN_180102638`:
+
+```text
+plane_span = ceil(width / 16) * ceil(height / 16) * 0x100
+base0      = selected_slot_base + 0x30
+base1      = base0 + plane_span
+base2      = 0
+mode       = 6
+```
+
+For `1920x1080`, `plane_span = 0x1fe000`, so `0x02500430 + 0x1fe000 = 0x026fe430`.
+
+The Type7 JPEG packet has a closely related but not identical layout:
+
+```text
++0x00 u32 video_type      = 7
++0x04 u32 data_len
++0x08 u32 sequence
++0x0c u32 mode            = 6
++0x10 u16 update_width
++0x12 u16 update_height
++0x14 u16 canvas_width    = 1920
++0x16 u16 canvas_height   = 1920
++0x18 u32 plane0_addr
++0x1c u32 plane1_addr
++0x20 u32 plane2_addr     = 0
++0x24 u32 image_format    = 0x0d
++0x30 bytes               = JPEG payload starts
+```
+
+Therefore, setup and Type7 do not place the base/plane fields at the same offset:
+
+```text
+setup type=4: base0/base1/base2 at +0x14/+0x18/+0x1c
+Type7 type=7: plane0/plane1/plane2 at +0x18/+0x1c/+0x20
+```
+
+This offset difference is easy to miss because both packet types begin with the same first four words and both carry JPEG payload at `+0x30`.
+
+Capture-wide correlation:
+
+```text
+win_type7_addr_xscan_64x64.pcapng:
+  setup type=4 fmt=0x0d count=27, all mode=6, unique base pairs=3
+  Type7 fmt=0x0d count=10, all mode=6
+
+win_type7_addr_yscan_64x64.pcapng:
+  setup type=4 fmt=0x0d count=3, all mode=6, unique base pairs=3
+  Type7 fmt=0x0d count=248, all mode=6
+
+type7_motion_horizontal_bands.pcapng:
+  setup type=4 fmt=0x0d count=37, all mode=6, unique base pairs=3
+  Type7 fmt=0x0d count=4, all mode=6
+
+type7_motion_vertical_bands.pcapng:
+  setup type=4 fmt=0x0d count=28, all mode=6, unique base pairs=3
+  Type7 fmt=0x0d count=2, all mode=6
+
+type7_motion_large_rects.pcapng:
+  setup type=4 fmt=0x0d count=28, all mode=6, unique base pairs=3
+  Type7 fmt=0x0d count=11, all mode=6
+```
+
+Practical rule:
+
+When reproducing this path, first emit or replay a type-4 JPEG setup packet for the chosen surface slot.
+Then emit Type7 packets whose `plane0/plane1` addresses are derived from the same slot's `base0/base1`.
+Do not copy the setup base offsets directly into Type7 without accounting for the Type7 canvas word at `+0x14`.
+
+## Handoff confidence notes
+
+This section is intended for implementation handoff.
+
+High-confidence findings:
+
+- Mode-6 is not just a pcap-side inference.
+  The driver initializes `context+0xdb0 = 3`, and setup builders translate that selector into protocol mode `6`.
+- `type=4, image_format=0x0d` is the JPEG setup packet relevant to the observed Type7 path.
+  It carries `mode=6`, `canvas=1920x1920`, and the selected surface slot's `base0/base1/base2`.
+- Type7 JPEG packets use the same mode and slot-derived addresses, but with dirty-rect offsets applied to `base0/base1`.
+- The observed address families `0x025...`, `0x029...`, and `0x02d...` correspond to three surface slots.
+- The setup packet and Type7 packet have different address-field offsets:
+  setup `base0/base1/base2` are at `+0x14/+0x18/+0x1c`, while Type7 `plane0/plane1/plane2` are at `+0x18/+0x1c/+0x20`.
+
+Strong implementation hypothesis:
+
+- A generated Type7 path that always writes to the `0x025...` slot can update a stale or currently non-visible surface.
+  This is consistent with packets being sent promptly while display reflection is delayed.
+- The correct next implementation step is to reproduce the setup/slot state, not only the Type7 packet body.
+
+Recommended implementation order:
+
+1. Replay a capture-derived `type=4, format=0x0d` setup packet and its following Type7 group unchanged.
+2. Once replay is stable, generate the same type-4 mode-6 setup packet for the selected slot.
+3. Generate Type7 JPEG packets against that same slot using the mode-6 plane formula.
+4. Only after that, optimize slot rotation, dirty-rect grouping, and ack/fence pacing.
+
+Still unverified:
+
+- Whether the device requires byte-for-byte replay of the setup packet, or whether a synthetic setup with matching fields is enough.
+- Whether the three-slot allocator state must match Windows exactly over long streams, or whether selecting any currently visible slot is sufficient.
+- Whether ack/fence pacing is required before reusing a slot or payload-ring region.
+- Whether mode-6 behavior is identical at resolutions other than the observed `1920x1080` case with `1920x1920` canvas.
+
+Suggested handoff wording:
+
+The mode-6/slot/address structure is understood well enough to guide implementation.
+It should not be described as complete protocol proof.
+The remaining validation is around device state synchronization: setup replay versus synthetic setup, slot visibility, and ack/fence pacing.
