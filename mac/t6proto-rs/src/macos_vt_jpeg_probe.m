@@ -116,6 +116,48 @@ static void fill_test_pattern(CVPixelBufferRef pixel_buffer, uint32_t frame_inde
     CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
 }
 
+static void fill_test_pattern_nv12(CVPixelBufferRef pixel_buffer, uint32_t frame_index) {
+    CVPixelBufferLockBaseAddress(pixel_buffer, 0);
+    size_t plane_count = CVPixelBufferGetPlaneCount(pixel_buffer);
+    if (plane_count < 2) {
+        CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+        return;
+    }
+
+    uint8_t *y_base = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 0);
+    uint8_t *uv_base = (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, 1);
+    size_t y_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 0);
+    size_t uv_stride = CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, 1);
+    size_t width = CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
+    size_t height = CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
+    size_t uv_width = CVPixelBufferGetWidthOfPlane(pixel_buffer, 1);
+    size_t uv_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
+
+    for (size_t y = 0; y < height; y++) {
+        uint8_t *row = y_base + y * y_stride;
+        for (size_t x = 0; x < width; x++) {
+            row[x] = (uint8_t)((16 + x + y + frame_index * 3) & 0xff);
+        }
+    }
+    for (size_t y = 0; y < uv_height; y++) {
+        uint8_t *row = uv_base + y * uv_stride;
+        for (size_t x = 0; x < uv_width; x++) {
+            row[x * 2 + 0] = (uint8_t)(96 + ((x + frame_index) & 0x1f));
+            row[x * 2 + 1] = (uint8_t)(160 - ((y + frame_index) & 0x1f));
+        }
+    }
+
+    CVPixelBufferUnlockBaseAddress(pixel_buffer, 0);
+}
+
+static void fill_test_pattern_for_format(CVPixelBufferRef pixel_buffer, uint32_t frame_index) {
+    if (CVPixelBufferGetPlaneCount(pixel_buffer) >= 2) {
+        fill_test_pattern_nv12(pixel_buffer, frame_index);
+    } else {
+        fill_test_pattern(pixel_buffer, frame_index);
+    }
+}
+
 static double now_ms(void) {
     return CFAbsoluteTimeGetCurrent() * 1000.0;
 }
@@ -501,62 +543,93 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
     @autoreleasepool {
         print_encoder_list();
 
-        NSDictionary *pixel_attrs = @{
-            (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
-            (__bridge NSString *)kCVPixelBufferWidthKey : @(width),
-            (__bridge NSString *)kCVPixelBufferHeightKey : @(height),
-            (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
-        };
         CVPixelBufferRef pixel_buffer = NULL;
-        CVReturn cv_status = CVPixelBufferCreate(kCFAllocatorDefault,
-                                                 width,
-                                                 height,
-                                                 kCVPixelFormatType_32BGRA,
-                                                 NULL,
-                                                 &pixel_buffer);
-        if (cv_status != kCVReturnSuccess || pixel_buffer == NULL) {
-            printf("CVPixelBufferCreate failed: %d\n", (int)cv_status);
-            return 2;
-        }
-
         VTCompressionSessionRef session = NULL;
         NSString *encoder_id = preferred_jpeg_encoder_id();
-        NSDictionary *encoder_spec = nil;
-        if (encoder_id != nil) {
-            encoder_spec = @{
-                (__bridge NSString *)kVTVideoEncoderSpecification_EncoderID : encoder_id,
-                (__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @YES,
+        OSStatus status = noErr;
+        const OSType pixel_formats[] = {
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        };
+        const char *pixel_format_names[] = {"BGRA", "420f", "420v"};
+        const size_t pixel_format_count = sizeof(pixel_formats) / sizeof(pixel_formats[0]);
+        const char *selected_pixel_format_name = NULL;
+
+        for (size_t i = 0; i < pixel_format_count; i++) {
+            OSType pixel_format = pixel_formats[i];
+            NSDictionary *pixel_attrs = @{
+                (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey : @(pixel_format),
+                (__bridge NSString *)kCVPixelBufferWidthKey : @(width),
+                (__bridge NSString *)kCVPixelBufferHeightKey : @(height),
+                (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey : @{},
             };
-            printf("Creating JPEG session with preferred encoder_id=%s\n", [encoder_id UTF8String]);
+
+            CVReturn cv_status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                                     width,
+                                                     height,
+                                                     pixel_format,
+                                                     NULL,
+                                                     &pixel_buffer);
+            if (cv_status != kCVReturnSuccess || pixel_buffer == NULL) {
+                printf("CVPixelBufferCreate(%s) failed: %d\n", pixel_format_names[i], (int)cv_status);
+                pixel_buffer = NULL;
+                continue;
+            }
+
+            NSDictionary *encoder_spec = nil;
+            if (encoder_id != nil) {
+                encoder_spec = @{
+                    (__bridge NSString *)kVTVideoEncoderSpecification_EncoderID : encoder_id,
+                    (__bridge NSString *)kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder : @YES,
+                };
+                printf("Creating JPEG session with preferred encoder_id=%s pixel_format=%s\n",
+                       [encoder_id UTF8String],
+                       pixel_format_names[i]);
+            }
+
+            status =
+                VTCompressionSessionCreate(kCFAllocatorDefault,
+                                           (int32_t)width,
+                                           (int32_t)height,
+                                           kCMVideoCodecType_JPEG,
+                                           encoder_spec == nil ? NULL : (__bridge CFDictionaryRef)encoder_spec,
+                                           (__bridge CFDictionaryRef)pixel_attrs,
+                                           NULL,
+                                           t6_vt_jpeg_output_callback,
+                                           NULL,
+                                           &session);
+            if (status != noErr || session == NULL) {
+                printf("Retrying JPEG session with automatic encoder selection pixel_format=%s\n",
+                       pixel_format_names[i]);
+                status = VTCompressionSessionCreate(kCFAllocatorDefault,
+                                                    (int32_t)width,
+                                                    (int32_t)height,
+                                                    kCMVideoCodecType_JPEG,
+                                                    NULL,
+                                                    (__bridge CFDictionaryRef)pixel_attrs,
+                                                    NULL,
+                                                    t6_vt_jpeg_output_callback,
+                                                    NULL,
+                                                    &session);
+            }
+            if (status == noErr && session != NULL) {
+                selected_pixel_format_name = pixel_format_names[i];
+                break;
+            }
+
+            printf("VTCompressionSessionCreate(JPEG, %s) failed: %d\n",
+                   pixel_format_names[i],
+                   (int)status);
+            CVPixelBufferRelease(pixel_buffer);
+            pixel_buffer = NULL;
         }
 
-        OSStatus status =
-            VTCompressionSessionCreate(kCFAllocatorDefault,
-                                       (int32_t)width,
-                                       (int32_t)height,
-                                       kCMVideoCodecType_JPEG,
-                                       encoder_spec == nil ? NULL : (__bridge CFDictionaryRef)encoder_spec,
-                                       (__bridge CFDictionaryRef)pixel_attrs,
-                                       NULL,
-                                       t6_vt_jpeg_output_callback,
-                                       NULL,
-                                       &session);
-        if (status != noErr || session == NULL) {
-            printf("Retrying JPEG session with automatic encoder selection\n");
-            status = VTCompressionSessionCreate(kCFAllocatorDefault,
-                                                (int32_t)width,
-                                                (int32_t)height,
-                                                kCMVideoCodecType_JPEG,
-                                                NULL,
-                                                (__bridge CFDictionaryRef)pixel_attrs,
-                                                NULL,
-                                                t6_vt_jpeg_output_callback,
-                                                NULL,
-                                                &session);
-        }
         if (status != noErr || session == NULL) {
             printf("VTCompressionSessionCreate(JPEG) failed: %d\n", (int)status);
-            CVPixelBufferRelease(pixel_buffer);
+            if (pixel_buffer != NULL) {
+                CVPixelBufferRelease(pixel_buffer);
+            }
             return 3;
         }
 
@@ -581,11 +654,12 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
             return 4;
         }
 
-        printf("VT JPEG session: width=%zu height=%zu quality=%.3f frames=%u\n",
+        printf("VT JPEG session: width=%zu height=%zu quality=%.3f frames=%u pixel_format=%s\n",
                width,
                height,
                quality,
-               frames);
+               frames,
+               selected_pixel_format_name == NULL ? "-" : selected_pixel_format_name);
         print_session_encoder_info(session);
 
         double total_encode_ms = 0.0;
@@ -594,7 +668,7 @@ int t6_vt_jpeg_probe(size_t width, size_t height, double quality, uint32_t frame
         uint8_t *first_data = NULL;
 
         for (uint32_t frame = 0; frame < frames; frame++) {
-            fill_test_pattern(pixel_buffer, frame);
+            fill_test_pattern_for_format(pixel_buffer, frame);
 
             T6VTEncodeResult result;
             result.semaphore = dispatch_semaphore_create(0);

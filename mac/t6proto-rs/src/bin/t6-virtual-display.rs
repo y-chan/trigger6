@@ -15,7 +15,8 @@ use t6proto::usb::T6Device;
 use t6proto::{
     BulkDmaHeader, BulkTransferChunk, DEFAULT_MAX_BULK_PACKET_SIZE, FrameScheduler,
     JpegFramePacket, RawFramePacket, Type4Mode6SetupPacket, Type7JpegTilePacket, VIDEO_COLOR_NV12,
-    VIDEO_COLOR_YUV444, VIDEO_COLOR_YV12, VIDEO_FLAG_RESET_JPEG, VramLayout, type7_jpeg_cmd_offset,
+    VIDEO_COLOR_YUV444, VIDEO_COLOR_YV12, VIDEO_FLAG_RESET_JPEG, VramLayout,
+    type7_mode6_cmd_offset,
 };
 use turbojpeg::Subsamp;
 use turbojpeg_sys as tj;
@@ -2028,7 +2029,7 @@ fn send_full_jpeg_frame(
         );
         let addresses = state
             .scheduler
-            .next_video_payload_exact(type7_jpeg_cmd_offset(jpeg_len) as usize, allocated_base);
+            .next_video_payload_exact(type7_mode6_cmd_offset(jpeg_len) as usize, allocated_base);
         state.current_display_fb_addr = Some(allocated_base);
         state.current_type7_allocated_base = allocated_base;
         state.current_type7_slot = (state.current_type7_slot + 1) % TYPE7_SETUP_SLOT_ORDER.len();
@@ -2075,7 +2076,7 @@ fn send_full_jpeg_frame(
             };
             patch_jpeg_type7_mode6_compat(&mut tile_jpeg)?;
             let type7_addresses = state.scheduler.next_video_payload_exact(
-                type7_jpeg_cmd_offset(tile_jpeg.len()) as usize,
+                type7_mode6_cmd_offset(tile_jpeg.len()) as usize,
                 allocated_base,
             );
             let (plane0_addr, plane1_addr, plane2_addr) = type7_mode6_plane_addrs(
@@ -2406,7 +2407,7 @@ fn send_jpeg_type7_frame(
         let (base0_addr, base1_addr, base2_addr) =
             type7_mode6_slot_bases(allocated_base, out_w, out_h);
         let setup_addresses = state.scheduler.next_video_payload_exact(
-            type7_jpeg_cmd_offset(full_jpeg.len()) as usize,
+            type7_mode6_cmd_offset(full_jpeg.len()) as usize,
             allocated_base,
         );
         let setup_packet = Type4Mode6SetupPacket::new(
@@ -2443,7 +2444,7 @@ fn send_jpeg_type7_frame(
         });
         let type7_addresses = state
             .scheduler
-            .next_video_payload_exact(type7_jpeg_cmd_offset(jpeg_len) as usize, allocated_base);
+            .next_video_payload_exact(type7_mode6_cmd_offset(jpeg_len) as usize, allocated_base);
         let type7_packet = Type7JpegTilePacket::new(
             &jpeg,
             type7_addresses.cmd_addr,
