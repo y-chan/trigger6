@@ -168,6 +168,38 @@ slot1: base0=0x029556f0 base1=0x02b536f0
 slot2: base0=0x02daa9b0 base1=0x02fa89b0
 ```
 
+## Type7 plane address offset
+
+追加された最小グループ:
+
+```text
+captures/type7_motion_youtube_2s_fullsnap_min_group/
+```
+
+このグループでは、setup frame 209 が slot1 を初期化し、Type7 frame 229 が同じ slot1 に部分更新を書いている。
+
+```text
+setup:
+  base0 = 0x029556f0
+  base1 = 0x02b536f0
+
+Type7:
+  size  = 1376x800
+  base0 = 0x029916f0
+  base1 = 0x02b716f0
+```
+
+差分は以下になる。
+
+```text
+plane0 delta = 0x0003c000 = 1920 * 128
+plane1 delta = 0x0001e000 = 1920 * 64
+```
+
+したがって、Type7 の luma offset は `top * canvas_width + left`、chroma offset は `(top / 2) * canvas_width + aligned_left` と見るのが自然である。
+ここで `canvas_width=1920` であり、chroma 側も stride は `canvas_height` ではなく `canvas_width` を使う。
+この点は実装側の `type7_mode6_plane_addrs` に反映済みである。
+
 ## Ack / Fence
 
 Every setup and every Type7 row has an interrupt ack with `flags=0x04`, `event=0x04`, and `value == sequence`.
